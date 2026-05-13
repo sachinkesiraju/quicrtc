@@ -48,9 +48,17 @@ func (p *Pump) runDatagramOrStream(ctx context.Context, recv *pubsub.Receiver) e
 	trackID := p.cfg.TrackID
 	var seq uint16
 
-	for au := range recv.Frames() {
-		if err := ctx.Err(); err != nil {
-			return err
+	frames := recv.Frames()
+	for {
+		var au pubsub.AccessUnit
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case a, ok := <-frames:
+			if !ok {
+				return nil
+			}
+			au = a
 		}
 
 		// Encode envelope + payload into a pooled buffer.
@@ -86,5 +94,4 @@ func (p *Pump) runDatagramOrStream(ctx context.Context, recv *pubsub.Receiver) e
 		*bufp = buf[:0]
 		datagramBufPool.Put(bufp)
 	}
-	return nil
 }

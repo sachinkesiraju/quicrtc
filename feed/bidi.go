@@ -3,6 +3,7 @@ package feed
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,17 @@ var ErrBidiOpenerNil = errors.New("feed: BidiOpener required for DeliveryBidiPer
 // enough that a stuck call can't leak the stream indefinitely.
 const DefaultBidiCallTimeout = 30 * time.Second
 
+// DefaultMaxBidiResponse caps the bytes read off each bidi response
+// stream. Bounds memory exposure from a hostile authenticated peer
+// that responds with a large payload (io.ReadAll would otherwise
+// buffer until OOM). Matches wire.MaxFeedPayload — anything that fits
+// the wire fits this read.
+const DefaultMaxBidiResponse = wire.MaxFeedPayload
+
+// ErrBidiResponseTooLarge is surfaced via OnBidiResponse when the peer's
+// response exceeded MaxBidiResponse and was truncated.
+var ErrBidiResponseTooLarge = errors.New("feed: bidi response exceeded MaxBidiResponse")
+
 // runBidiPerCall opens one bidi stream per AU. Each AU is treated as
 // a logical call: write the request bytes, FIN the send side, then
 // (optionally) consume the response. Calls run concurrently — the
@@ -69,13 +81,25 @@ func (p *Pump) runBidiPerCall(ctx context.Context, recv *pubsub.Receiver) error 
 	if timeout == 0 {
 		timeout = DefaultBidiCallTimeout
 	}
+	maxResp := p.cfg.MaxBidiResponse
+	if maxResp <= 0 {
+		maxResp = DefaultMaxBidiResponse
+	}
 
 	var wg sync.WaitGroup
 	defer wg.Wait() // wait for all in-flight calls to settle before returning
 
-	for au := range recv.Frames() {
-		if err := ctx.Err(); err != nil {
-			return err
+	frames := recv.Frames()
+	for {
+		var au pubsub.AccessUnit
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case a, ok := <-frames:
+			if !ok {
+				return nil
+			}
+			au = a
 		}
 
 		wg.Add(1)
@@ -132,18 +156,28 @@ func (p *Pump) runBidiPerCall(ctx context.Context, recv *pubsub.Receiver) error 
 				p.cfg.OnWriteBytes(wire.FeedHeaderLen + len(au.Bytes))
 			}
 
-			// Drain response. Either deliver to the application via
-			// callback or just discard so the stream closes cleanly.
-			// io.ReadAll returns the bytes it managed to read PLUS
-			// any error; we surface both so the app can distinguish
-			// partial-due-to-cancel from successful-end-of-stream.
+			// Drain response, bounded by MaxBidiResponse so a hostile
+			// peer can't OOM the server by responding with a multi-GB
+			// payload. Read at most maxResp+1 bytes so we can detect
+			// the exact-boundary case (n == maxResp+1 means the peer
+			// had more to send); on overflow we CancelRead to release
+			// flow-control credit.
 			if p.cfg.OnBidiResponse != nil {
-				resp, readErr := io.ReadAll(stream)
+				resp, readErr := io.ReadAll(io.LimitReader(stream, maxResp+1))
+				if int64(len(resp)) > maxResp {
+					resp = resp[:maxResp]
+					stream.CancelRead(0)
+					if readErr == nil {
+						readErr = fmt.Errorf("%w: limit=%d", ErrBidiResponseTooLarge, maxResp)
+					}
+				}
 				p.cfg.OnBidiResponse(au.Seq, resp, readErr)
 			} else {
-				_, _ = io.Copy(io.Discard, stream)
+				n, _ := io.Copy(io.Discard, io.LimitReader(stream, maxResp+1))
+				if n > maxResp {
+					stream.CancelRead(0)
+				}
 			}
 		}(au)
 	}
-	return nil
 }

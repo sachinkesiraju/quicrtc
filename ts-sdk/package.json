@@ -1,6 +1,6 @@
 {
   "name": "quicrtc",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Real-time transport for AI agent sessions over QUIC/WebTransport. TypeScript client, wire-compatible with the Go server.",
   "type": "module",
   "main": "dist/index.js",
@@ -12,8 +12,24 @@
     }
   },
   "files": [
-    "dist",
-    "README.md"
+    "dist/index.js",
+    "dist/index.js.map",
+    "dist/index.d.ts",
+    "dist/index.d.ts.map",
+    "dist/client.js",
+    "dist/client.js.map",
+    "dist/client.d.ts",
+    "dist/client.d.ts.map",
+    "dist/wire.js",
+    "dist/wire.js.map",
+    "dist/wire.d.ts",
+    "dist/wire.d.ts.map",
+    "dist/types.js",
+    "dist/types.js.map",
+    "dist/types.d.ts",
+    "dist/types.d.ts.map",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc",

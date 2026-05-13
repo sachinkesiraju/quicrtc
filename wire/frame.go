@@ -194,11 +194,12 @@ const (
 // OOM with a forged length prefix.
 const MaxControlPayload = 64 * 1024
 
-// MaxFeedPayload caps a single access unit. 1080p baseline H.264
-// keyframes can run past 1 MiB at high bitrates; 16 MiB is the
-// browser-side ceiling, so neither side rejects frames the other
-// will accept.
-const MaxFeedPayload = 16 * 1024 * 1024
+// MaxFeedPayload caps a single access unit. The on-the-wire length
+// field is 3 bytes (24 bits), so the maximum encodable payload is
+// 0xFFFFFF bytes (one byte short of 16 MiB). 1080p baseline H.264
+// keyframes can run past 1 MiB at high bitrates; the ceiling is the
+// largest value the length field can express without truncation.
+const MaxFeedPayload = 0xFFFFFF
 
 // FeedHeaderLen is the fixed-size feed-frame header in bytes:
 // type(1) + len(3) + pts(8) + seq(4) + flags(1) = 17.

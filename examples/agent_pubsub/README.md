@@ -13,7 +13,7 @@ session telemetry datagrams — all on **one QUIC connection**.
 > hardcoded; tool calls cycle through a fixed list. No model runs.
 >
 > **Where the multistream advantage is *measured**:** in
-> cua — not here. This example shows the SHAPE; that
+> [cua](../cua) — not here. This example shows the SHAPE; that
 > example prints the numbers.
 
 ## Tracks
@@ -22,13 +22,8 @@ session telemetry datagrams — all on **one QUIC connection**.
 |-------------|-----------------------|---------------|-------------------------------------------------------------|
 | `screen`    | `KindVideo`           | 5 Hz, ~30 KB  | stream-per-GOP uni stream                                   |
 | `reasoning` | `KindTokens`          | 10 Hz, tiny   | persistent low-latency uni stream                           |
-| `actions`   | `KindTokens` (\*)     | 0.5 Hz, JSON  | persistent low-latency uni stream                           |
+| `actions`   | `KindToolCalls`       | 0.5 Hz, JSON  | fresh bidi stream per AU                                    |
 | `telemetry` | datagrams             | 2 Hz, tiny    | unreliable QUIC datagrams (4-byte envelope)                 |
-
-(\*) `KindToolCalls` is the architectural fit, and the Go client
-accepts incoming bidi streams. ts-sdk doesn't yet, so this example
-uses `KindTokens` to keep the browser viewer wired. Switch when
-ts-sdk grows `incomingBidirectionalStreams`.
 
 ## What this teaches
 
@@ -98,15 +93,15 @@ making progress concurrently on one connection.
 ## What this does NOT prove
 
 - That the per-Kind dispatch is **measurably** faster than a naive
-  single-track shape. That's cua's job — it prints
-  actual p50/p95/max numbers comparing naive vs multistream dispatch
-  on the same workload.
+  single-track shape. That's [cua](../cua)'s job — it prints actual
+  p50/p95/max numbers comparing naive vs multistream dispatch on the
+  same workload.
 
 ## What to read next
 
-- cua — deterministic CUA workload with measured
+- [cua](../cua) — deterministic CUA workload with measured
   naive-vs-multistream latency comparison.
-- ts-sdk/examples/viewer —
-  browser companion. Renders the screen track as actual pixels.
-- relay — front this server with a relay; the viewer
+- [ts-sdk/examples/viewer](../../ts-sdk/examples/viewer) — browser
+  companion. Renders the screen track as actual pixels.
+- [relay](../relay) — front this server with a relay; the viewer
   can't tell the difference.

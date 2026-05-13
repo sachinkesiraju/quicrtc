@@ -3,6 +3,82 @@
 All notable changes to quicrtc. Pre-1.0: minor versions may include
 breaking API changes; patch versions don't.
 
+## [0.1.1] — Patch release
+
+### Fixed — wire correctness
+
+- **`MaxFeedPayload` off-by-one (silent corruption).** The constant was
+  `16 * 1024 * 1024 = 0x1000000`, but the on-the-wire feed-frame length
+  field is 3 bytes (cap `0xFFFFFF`). A payload of exactly 16 MiB passed
+  validation, then the encoder wrote length `0` and the next frame
+  desynced the stream. Constant is now `0xFFFFFF`, and the pooled
+  encoder rejects oversize payloads explicitly. The same length check
+  is now exercised by `TestMaxFeedPayloadBoundaryRoundTrip`.
+- **TypeScript `TrackKind.ToolCalls` wire value.** Was `"tool_calls"`;
+  Go's `track.KindToolCalls` is `"toolcalls"` — the kind string on
+  every Announce frame. Mismatch caused TS viewers to silently route
+  incoming tool-call tracks to the tokens panel. Now matches Go.
+- **TS SDK accepts incoming bidirectional streams.** `KindToolCalls`
+  tracks from Go publishers are delivered to the browser SDK
+  (previously dropped on the floor because the TS client never called
+  `incomingBidirectionalStreams.getReader()`).
+
+### Fixed — server stability and safety
+
+- **`handleUnannounce` race-panic.** Closing the inbound track's recv
+  channel while `drainInboundStream` was still sending on it crashed
+  the session goroutine with "send on closed channel" on legitimate
+  client behavior. Replaced with a `done` channel that senders and
+  readers select against, so close is one-shot and race-free.
+- **`AddTrackSpec` silently demoted `PriorityCritical`.** Spec
+  `Priority: 0` was treated as "unset" and overridden to
+  `PriorityNormal` (4). Since `PriorityCritical` is also `0`, callers
+  could not register critical-priority tracks via the modern entry
+  point. Now defaults via the new `track.DefaultPriority(kind)` —
+  audio tracks get `PriorityCritical`, video/tokens/tool calls get
+  `PriorityHigh`, telemetry gets `PriorityBackground`.
+- **`OnSession` now fires after handshake.** The callback previously
+  ran synchronously with `session.New`, before the HELLO/SDP exchange
+  authenticated the peer. Applications received a `SessionHandle`
+  backed by an unauthenticated connection. Now wired through a new
+  `session.Config.OnHandshakeComplete` callback that fires post-auth
+  with `SessionID` populated.
+- **`runBidiPerCall` response read is bounded.** `io.ReadAll` was
+  unbounded; an authenticated peer could OOM the server with a large
+  bidi-stream response. Now capped by a new `feed.Config.MaxBidiResponse`
+  (default `DefaultMaxBidiResponse` = `wire.MaxFeedPayload`); the read
+  is wrapped in `io.LimitReader` and the stream is `CancelRead`d on
+  cap-hit to release flow-control credit.
+- **`ShareLink` produces valid URLs for IPv6 hosts.** IPv6 host strings
+  now get bracket-wrapped (RFC 3986 §3.2.2).
+
+### Added — public API
+
+- **`track.DefaultPriority(kind Kind) Priority`** — per-Kind default
+  priority lookup. Used by `server.AddTrackSpec` so `spec.Priority=0`
+  picks the right default per Kind.
+- **`session.Config.OnHandshakeComplete`** — fires from `Run` after
+  handshake succeeds and `SessionID` is populated.
+- **`session.Config.OnInboundDropped`** — symmetrical with
+  `feed.Config.OnAUDropped` for the inbound (PublishBack) direction.
+  Lets operators see receiver-side AU drops (previously silent).
+- **`feed.Config.MaxBidiResponse`** — caps bytes read off each
+  BidiPerCall response stream. Zero picks `DefaultMaxBidiResponse`.
+- **`feed.DefaultMaxBidiResponse`** + **`feed.ErrBidiResponseTooLarge`**.
+- **TS SDK populates `Hello.last_seen` on reconnect.** Closes the
+  in-flight gap on resume in one round-trip rather than relying on
+  post-handshake `Resume` frames per track (those still ship for
+  back-compat).
+
+### Changed — TS SDK
+
+- `drainBidiStream` falls back to `writable.abort()` when
+  `writable.close()` fails, so the server's `io.ReadAll` returns
+  immediately rather than blocking for `BidiCallTimeout` (30 s) per
+  AU and leaking a goroutine + stream per failure.
+
+[0.1.1]: https://github.com/sachinkesiraju/quicrtc/releases/tag/v0.1.1
+
 ## [0.1.0] — Initial public release
 
 ### Added — protocol
@@ -55,6 +131,14 @@ breaking API changes; patch versions don't.
 - `server.Config.OnKeyframeRequest` callback.
 - `server.Config.OnSession` callback + `server.SessionHandle` type
   exposing per-session `SendDatagram` / `ReceiveDatagram` / `Context`.
+- `server.SessionHandle.InboundRecv` — per-session receive of a track
+  the *subscriber* published (PublishBack). Unlike `Server.AnySession`,
+  this is scoped to the originating session, so AUs from other
+  subscribers do not mix in.
+- Post-handshake Announce replay — clients see `TypeAnnounce` for every
+  pre-existing server-side track right after the SDP response, so
+  `RemoteTracks()` is populated without waiting for the first uni
+  stream's stream-header.
 - TypeScript SDK: `QuicRTCClient.requestKeyframe`,
   `sendDatagram`, `receiveDatagram`; module-level
   `encodeDatagram`, `decodeDatagram`, `DatagramTooLargeError`.

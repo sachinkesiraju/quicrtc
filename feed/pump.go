@@ -33,6 +33,7 @@ package feed
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -146,6 +147,12 @@ type Config struct {
 	// BidiPerCall calls. Zero picks DefaultBidiCallTimeout (30s).
 	BidiCallTimeout time.Duration
 
+	// MaxBidiResponse caps the bytes read off each BidiPerCall response
+	// stream. <=0 picks DefaultMaxBidiResponse. Set lower for stricter
+	// memory caps under high call rates or when responses are bounded
+	// by the application's protocol (e.g., a tool-call schema).
+	MaxBidiResponse int64
+
 	// OnBidiResponse is invoked when a bidi call completes. seq matches
 	// the AU's Seq for correlation. response holds the bytes received
 	// before the peer FIN'd or the read errored; err is non-nil when
@@ -231,9 +238,17 @@ func (p *Pump) runStreamGOP(ctx context.Context, recv *pubsub.Receiver) error {
 		}
 	}()
 
-	for au := range recv.Frames() {
-		if err := ctx.Err(); err != nil {
-			return err
+	frames := recv.Frames()
+	for {
+		var au pubsub.AccessUnit
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case a, ok := <-frames:
+			if !ok {
+				return nil
+			}
+			au = a
 		}
 
 		if au.Keyframe {
@@ -298,7 +313,6 @@ func (p *Pump) runStreamGOP(ctx context.Context, recv *pubsub.Receiver) error {
 			p.cfg.OnWriteBytes(wire.FeedHeaderLen + len(au.Bytes))
 		}
 	}
-	return nil
 }
 
 // lowLatencyBufPool reuses scratch buffers for the wire-frame encode.
@@ -375,9 +389,17 @@ func (p *Pump) runStreamLowLatency(ctx context.Context, recv *pubsub.Receiver) e
 	// and continue. We never CancelWrite the stream — unlike GOP,
 	// there's no keyframe-driven resync to recover into.
 
-	for au := range recv.Frames() {
-		if err := ctx.Err(); err != nil {
-			return err
+	frames := recv.Frames()
+	for {
+		var au pubsub.AccessUnit
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case a, ok := <-frames:
+			if !ok {
+				return nil
+			}
+			au = a
 		}
 
 		// Lazy stream re-open: if the initial open failed (or a write
@@ -417,7 +439,6 @@ func (p *Pump) runStreamLowLatency(ctx context.Context, recv *pubsub.Receiver) e
 			p.cfg.OnWriteBytes(wire.FeedHeaderLen + len(au.Bytes))
 		}
 	}
-	return nil
 }
 
 // writeFeedFramePooled is a pooled-buffer variant of wire.WriteFeedFrame
@@ -427,6 +448,11 @@ func (p *Pump) runStreamLowLatency(ctx context.Context, recv *pubsub.Receiver) e
 // runStreamGOP (typ = TypeKeyframe or TypePFrame) and runStreamLowLatency
 // (typ = TypeKeyframe; every AU is self-contained).
 func writeFeedFramePooled(w io.Writer, typ byte, pts uint64, seq uint32, flags byte, payload []byte) error {
+	// Reject oversize payloads before encoding. The 3-byte length field
+	// caps at MaxFeedPayload; silently truncating would desync the wire.
+	if len(payload) > wire.MaxFeedPayload {
+		return fmt.Errorf("%w: feed %d > %d", wire.ErrFrameTooLarge, len(payload), wire.MaxFeedPayload)
+	}
 	bufp := lowLatencyBufPool.Get().(*[]byte)
 	buf := (*bufp)[:0]
 	defer func() {

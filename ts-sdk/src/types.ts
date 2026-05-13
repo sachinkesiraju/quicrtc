@@ -12,13 +12,16 @@
  */
 
 /**
- * Track kind constants. Values match Go's track.Kind string values.
+ * Track kind constants. Values match Go's track.Kind string values
+ * EXACTLY — these strings ride the wire on every Announce frame and
+ * are compared verbatim against the Go-side `track.Kind` constants.
+ * Mismatches silently route incoming tracks to the wrong handler.
  */
 export enum TrackKind {
   Video = "video",
   Audio = "audio",
   Tokens = "tokens",
-  ToolCalls = "tool_calls",
+  ToolCalls = "toolcalls",
   Telemetry = "telemetry",
 }
 

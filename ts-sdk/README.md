@@ -120,7 +120,7 @@ benchmarks suite.
 |-------------|--------------|-------------------------|
 | Chrome 114+ | Native       | Full                    |
 | Edge 114+   | Native       | Full                    |
-| Safari 18+ (iOS / macOS) | Experimental | Enable `WebTransport` in Develop menu; full support coming in future versions |
+| Safari 26.4+ (iOS / macOS) | Native | Full (shipped March 2026)        |
 | Firefox     | Behind flag  | Enable `network.webtransport.enabled` |
 
 ## License

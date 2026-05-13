@@ -432,11 +432,11 @@ func (b *Broadcaster) Count() int {
 func (b *Broadcaster) Publish(au AccessUnit) {
 	// Per-AU size cap: drop oversized AUs before they enter any
 	// receiver's queue. This bounds memory at chanSize × maxAUBytes
-	// per receiver. Default cap matches wire.MaxFeedPayload (16 MiB)
-	// so anything that fits the wire fits memory.
+	// per receiver. Default cap matches wire.MaxFeedPayload so
+	// anything that fits the wire fits memory.
 	b.mu.Lock()
-	cap := b.maxAUBytes
-	if cap > 0 && int64(len(au.Bytes)) > cap {
+	maxAU := b.maxAUBytes
+	if maxAU > 0 && int64(len(au.Bytes)) > maxAU {
 		b.mu.Unlock()
 		return
 	}

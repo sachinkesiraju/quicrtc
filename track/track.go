@@ -123,6 +123,26 @@ func (c DeliveryClass) String() string {
 	}
 }
 
+// DefaultPriority maps a Kind to its preferred Priority. Centralizes
+// the per-Kind defaults so constructors in presets.go, server.AddTrackSpec,
+// and any external caller stay in sync.
+//
+// Note that PriorityCritical is the zero value of Priority (0); callers
+// that pass spec.Priority=0 with an explicit Kind get this default
+// rather than being silently bumped to PriorityNormal.
+func DefaultPriority(k Kind) Priority {
+	switch k {
+	case KindAudio:
+		return PriorityCritical
+	case KindVideo, KindTokens, KindToolCalls:
+		return PriorityHigh
+	case KindTelemetry:
+		return PriorityBackground
+	default:
+		return PriorityNormal
+	}
+}
+
 // DefaultDeliveryClass maps a Kind to its preferred DeliveryClass.
 // Used at track construction to populate LocalTrack.Delivery and at
 // session-attach time to populate feed.Config.Delivery.

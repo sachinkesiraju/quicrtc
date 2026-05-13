@@ -140,6 +140,20 @@ type Config struct {
 	// the session's DataChannel. The callback runs in its own
 	// goroutine; the session does not wait for it.
 	OnDataChannel func(*datachannel.Channel)
+
+	// OnInboundDropped, if non-nil, is invoked when an inbound (PublishBack)
+	// AU is dropped because the per-track queue was full. Symmetrical
+	// with feed.Config.OnAUDropped for the outbound direction. Optional;
+	// useful for metrics that want visibility into receiver-side loss
+	// (otherwise drops are silent).
+	OnInboundDropped func(trackName string)
+
+	// OnHandshakeComplete, if non-nil, is invoked from Run after the
+	// HELLO/SDP handshake succeeds and SessionID is populated. Used by
+	// the server to expose the SessionHandle to applications only after
+	// the peer has authenticated. The callback runs on the session
+	// goroutine; long-running work should spawn its own goroutine.
+	OnHandshakeComplete func(s *Session)
 }
 
 // ErrAuth is returned when the subscriber's HELLO slug doesn't match.
@@ -151,6 +165,13 @@ var ErrBadHello = errors.New("quicrtc/session: bad hello")
 
 // ErrIdle is returned when the idle watchdog fires.
 var ErrIdle = errors.New("quicrtc/session: idle timeout")
+
+// minPingInterval is the minimum interval between PONG responses we
+// produce for inbound PINGs. Faster PINGs are silently dropped to
+// prevent an authenticated peer from spending server CPU on
+// heartbeat work. One PONG/sec is well above what any legitimate
+// keepalive needs.
+const minPingInterval = time.Second
 
 // UniReceiver is the minimal subset of webtransport.Session needed to
 // accept inbound uni streams from a subscriber that's running
@@ -257,6 +278,10 @@ type Session struct {
 
 	bytesOut     atomic.Uint64
 	lastFeedNano atomic.Int64
+	// lastPingNano rate-limits inbound PING handling so an authenticated
+	// peer can't pin CPU by spamming PINGs. Stored as unix nanoseconds;
+	// PINGs faster than minPingInterval are silently dropped.
+	lastPingNano atomic.Int64
 
 	// Track set. Tracks may be attached before Run starts (snapshot
 	// at session start) or added dynamically while Run is in flight
@@ -285,6 +310,12 @@ type inboundTrack struct {
 	codec     string
 	ch        chan pubsub.AccessUnit
 	announced bool
+	// done is closed by handleUnannounce. Senders in drainInboundStream
+	// and readers in InboundRecv both select on it, so unannouncing a
+	// track in flight is race-free: closing t.ch directly would panic
+	// any concurrent send. Closing done is safe (one-shot, guarded by
+	// inboundMu) and unblocks readers via select default behavior.
+	done chan struct{}
 }
 
 type trackPump struct {
@@ -330,7 +361,8 @@ func (s *Session) SetUniReceiver(r UniReceiver) {
 // InboundRecv blocks until the next AccessUnit on the named inbound
 // track arrives. The track must have been Announced by the subscriber
 // (a TypeAnnounce frame on the control stream); otherwise this blocks
-// until the announce arrives or ctx is done.
+// until the announce arrives or ctx is done. Returns io.EOF when the
+// subscriber Unannounces the track.
 func (s *Session) InboundRecv(ctx context.Context, name string) (pubsub.AccessUnit, error) {
 	t := s.inboundTrackChan(name)
 	select {
@@ -339,6 +371,18 @@ func (s *Session) InboundRecv(ctx context.Context, name string) (pubsub.AccessUn
 			return pubsub.AccessUnit{}, io.EOF
 		}
 		return au, nil
+	case <-t.done:
+		// Drain any AUs buffered before the Unannounce arrived; if
+		// the channel is empty, surface EOF.
+		select {
+		case au, ok := <-t.ch:
+			if !ok {
+				return pubsub.AccessUnit{}, io.EOF
+			}
+			return au, nil
+		default:
+			return pubsub.AccessUnit{}, io.EOF
+		}
 	case <-ctx.Done():
 		return pubsub.AccessUnit{}, ctx.Err()
 	}
@@ -357,6 +401,7 @@ func (s *Session) inboundTrackChan(name string) *inboundTrack {
 	t := &inboundTrack{
 		name: name,
 		ch:   make(chan pubsub.AccessUnit, 64),
+		done: make(chan struct{}),
 	}
 	s.inboundTracks[name] = t
 	return t
@@ -580,6 +625,15 @@ func (s *Session) Run(parent context.Context) error {
 		return err
 	}
 
+	// Notify the embedder that the peer is now authenticated and the
+	// SessionID is populated. The server uses this to expose the
+	// per-session SessionHandle to its OnSession callback; without it
+	// applications would receive a handle backed by an unauthenticated
+	// peer.
+	if s.cfg.OnHandshakeComplete != nil {
+		s.cfg.OnHandshakeComplete(s)
+	}
+
 	// Replay Announces so RemoteTracks() reflects pre-existing tracks
 	// without waiting for the first uni stream header. Goroutine'd to
 	// avoid blocking Run on a slow control reader.
@@ -771,6 +825,16 @@ func (s *Session) controlReader(ctx context.Context) error {
 		// see package doc.
 		switch t {
 		case wire.TypePing:
+			// Rate-limit: drop PINGs that arrive within minPingInterval
+			// of the last PONG we sent. The idle watchdog keys on feed
+			// progress, so suppressing a flood of PINGs doesn't risk
+			// false-positive idle closes.
+			now := time.Now().UnixNano()
+			last := s.lastPingNano.Load()
+			if last != 0 && now-last < int64(minPingInterval) {
+				continue
+			}
+			s.lastPingNano.Store(now)
 			if err := s.writer.Write(wire.TypePong, payload); err != nil {
 				return err
 			}
@@ -825,9 +889,12 @@ func (s *Session) handleAnnounce(a wire.Announce) {
 	s.inboundMu.Unlock()
 }
 
-// handleUnannounce closes the inbound track's recv channel after
-// draining buffered AUs. Subsequent stream-headers naming this track
-// will recreate it.
+// handleUnannounce signals the inbound track's drain goroutines to
+// exit by closing t.done. Subsequent stream-headers naming this track
+// recreate the entry with a fresh done channel. We deliberately do NOT
+// close t.ch — drainInboundStream may be mid-send on it from another
+// goroutine, and "send on closed channel" panics. The done channel is
+// closed under inboundMu so the one-shot close is race-free.
 func (s *Session) handleUnannounce(u wire.Unannounce) {
 	s.inboundMu.Lock()
 	t, ok := s.inboundTracks[u.Name]
@@ -836,8 +903,8 @@ func (s *Session) handleUnannounce(u wire.Unannounce) {
 		return
 	}
 	delete(s.inboundTracks, u.Name)
+	close(t.done)
 	s.inboundMu.Unlock()
-	close(t.ch)
 }
 
 // uniAcceptLoop accepts subscriber-originated uni streams and drains
@@ -892,11 +959,16 @@ func (s *Session) drainInboundStream(ctx context.Context, stream UniStream) {
 		}
 		select {
 		case t.ch <- au:
+		case <-t.done:
+			// Track was Unannounced while in flight; stop draining.
+			return
 		case <-ctx.Done():
 			return
 		default:
-			// Receiver not draining fast enough; drop. Inbound queue is
-			// configurable via DataInboundBuffer-style tunable later.
+			// Receiver not draining fast enough; drop.
+			if s.cfg.OnInboundDropped != nil {
+				s.cfg.OnInboundDropped(trackName)
+			}
 		}
 	}
 }

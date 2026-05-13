@@ -3,6 +3,7 @@
 [![CI](https://github.com/sachinkesiraju/quicrtc/actions/workflows/test.yml/badge.svg)](https://github.com/sachinkesiraju/quicrtc/actions/workflows/test.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/sachinkesiraju/quicrtc.svg)](https://pkg.go.dev/github.com/sachinkesiraju/quicrtc)
 [![Go Report Card](https://goreportcard.com/badge/github.com/sachinkesiraju/quicrtc)](https://goreportcard.com/report/github.com/sachinkesiraju/quicrtc)
+[![npm version](https://img.shields.io/npm/v/quicrtc.svg)](https://www.npmjs.com/package/quicrtc)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 **Real-time transport for AI agent sessions over QUIC/WebTransport.**
@@ -60,7 +61,7 @@ data to a client at once.
 
 ## Performance
 
-Real numbers from the benchmark suite in the repo, run on Apple Silicon loopback. Each row's baseline is the current incumbent practice for that workload — pion's canonical pattern, the standard alternative, or a legacy quicrtc path. WAN row on two GCP VMs (~50 ms RTT) via [`testing/wan_bench`](testing/wan_bench/). Reproduce: `go test -v -p 1 -run TestName ./testing/benchmarks/...`.
+Real numbers from the benchmark suite in the repo, run on Apple Silicon loopback. Each row's baseline is the current incumbent practice for that workload. WAN workload run on two GCP VMs (~50 ms RTT) via [`testing/wan_bench`](testing/wan_bench/). To reproduce: `go test -v -p 1 -run TestName ./testing/benchmarks/...`.
 
 | Workload | Baseline | quicrtc |
 |---|---|---|
@@ -77,7 +78,7 @@ Real numbers from the benchmark suite in the repo, run on Apple Silicon loopback
 
 **Where quicrtc wins** — workloads with multiple traffic shapes on one connection, where the structural advantage shows up:
 
-- **Multi-modal AI traffic** — video + tokens + tool calls + telemetry from one server to clients. Each track gets its own QUIC stream with its own flow-control window, so a video burst can't HOL-block tokens. Closed-loop computer-use (60 Mbps screen + 200 tok/s + 100 actions/s + dom_events on one session) holds token p99 at **475 µs** and action→DOM RTT p99 at **966 µs** with 100% delivery.
+- **Multi-modal AI traffic** — video + tokens + tool calls + telemetry from one server to clients. Each track gets its own QUIC stream with its own flow-control window, so a video burst can't HOL-block tokens. Closed-loop computer-use (60 Mbps screen + 200 tok/s + 100 actions/s + dom_events on one session) holds token p99 under **5 ms** and action→DOM RTT p99 under **10 ms** with 100% delivery — see [`testing/benchmarks/agent/computer_use_test.go`](testing/benchmarks/agent/computer_use_test.go) for the asserted thresholds (representative run: 475 µs / 966 µs on macOS loopback).
 - **Stalled tool calls** — `BidiPerCall` opens a fresh bidi stream per call, so one slow call doesn't block the other seven (20× median speedup vs shared-stream serial).
 - **Packet-loss recovery** — subscriber-driven `RequestKeyframe()` flushes a fresh GOP in one frame interval (~33 ms) instead of waiting up to 2 s for the next natural keyframe.
 - **1:N fan-out** — native relay splice-forwards QUIC stream messages without re-encoding; SFU has to repack DTLS+SCTP at every hop.

@@ -829,6 +829,7 @@ export class QuicRTCClient {
       // Spawn read loops.
       this.startControlReader();
       this.startFeedAcceptor();
+      this.startBidiAcceptor();
 
       this.setConnectionState(ConnectionState.Connected);
       this.currentRetry = 0;
@@ -851,6 +852,18 @@ export class QuicRTCClient {
       session: options.sessionId,
       features,
     };
+    // On reconnect with a known sessionId, populate last_seen so the
+    // server can replay AUs from its parked-session per-track replay
+    // ring straight after handshake — closes the in-flight gap that
+    // would otherwise require a post-handshake Resume frame per track
+    // (still sent below for back-compat with older servers).
+    if (options.sessionId && this.lastSeqByTrack.size > 0) {
+      const lastSeen: Record<string, number> = {};
+      for (const [trackName, seq] of this.lastSeqByTrack) {
+        lastSeen[trackName] = seq;
+      }
+      hello.last_seen = lastSeen;
+    }
     await this.writeControl(FrameType.Hello, marshalHello(hello));
 
     // Read SDP with timeout. The setTimeout is paired with a clearTimeout
@@ -989,6 +1002,56 @@ export class QuicRTCClient {
         try { streamsReader.releaseLock(); } catch { /* ignore */ }
       }
     })();
+  }
+
+  /** Bidi acceptor: accepts inbound bidi streams (KindToolCalls /
+   *  BidiPerCall delivery). Each stream carries TypeStreamHeader +
+   *  one feed frame, identical to uni streams except the wire shape
+   *  is bidirectional. We close our send half so the server's
+   *  io.ReadAll returns without waiting for BidiCallTimeout (30 s),
+   *  which would otherwise leak a goroutine + stream per AU. */
+  private startBidiAcceptor(): void {
+    void (async () => {
+      const signal = this.abortController.signal;
+      const transport = this.transport;
+      if (!transport || !transport.incomingBidirectionalStreams) {
+        // Browsers without bidi accept can't receive KindToolCalls;
+        // not fatal — uni-stream tracks still work.
+        return;
+      }
+      const streamsReader = transport.incomingBidirectionalStreams.getReader();
+      try {
+        while (!this.closed && !signal.aborted) {
+          const { value, done } = await streamsReader.read();
+          if (done || !value) break;
+          void this.drainBidiStream(value);
+        }
+      } catch {
+        // feedAcceptor surfaces the transport error; exit quietly.
+      } finally {
+        try { streamsReader.releaseLock(); } catch { /* ignore */ }
+      }
+    })();
+  }
+
+  private async drainBidiStream(stream: WebTransportBidirectionalStream): Promise<void> {
+    // FIN our send half so the server's io.ReadAll returns. Without
+    // this, the server's BidiPerCall path blocks per call until
+    // BidiCallTimeout (default 30 s).
+    try {
+      await stream.writable.close();
+    } catch {
+      // close() failed (already closed, aborted, or transport error).
+      // Fall back to abort() so the server sees a stream reset and its
+      // io.ReadAll returns immediately — otherwise we leak a goroutine
+      // + stream per AU until BidiCallTimeout fires.
+      try {
+        await stream.writable.abort();
+      } catch {
+        /* writable already gone; nothing to do */
+      }
+    }
+    return this.drainFeedStream(stream.readable);
   }
 
   private async drainFeedStream(stream: ReadableStream<Uint8Array>): Promise<void> {

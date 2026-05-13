@@ -129,15 +129,13 @@ func TestFeedFrameTooLarge(t *testing.T) {
 	if !errors.Is(err, ErrFrameTooLarge) {
 		t.Fatalf("want ErrFrameTooLarge, got %v", err)
 	}
-	// Forge a header claiming length > MaxFeedPayload (16 MiB = 0x1000000;
-	// 3-byte length max 0xFFFFFF = 16 MiB - 1, so MaxFeedPayload+1 is
-	// not representable. Use the boundary check via construction.)
-	// Test the read path with a payload-length exceeding the cap by
-	// constructing our own header bytes.
+	// MaxFeedPayload == 0xFFFFFF is the largest value the 3-byte length
+	// field can express. A header at exactly that boundary should pass
+	// the size check (and then fail with EOF because we didn't supply
+	// the payload bytes).
 	hdr := make([]byte, FeedHeaderLen)
 	hdr[0] = TypeKeyframe
-	hdr[1], hdr[2], hdr[3] = 0xff, 0xff, 0xff // 16 MiB - 1, just under cap → should pass header check
-	// confirm the cap is exactly representable: this should NOT trigger ErrFrameTooLarge
+	hdr[1], hdr[2], hdr[3] = 0xff, 0xff, 0xff // 0xFFFFFF, exact cap
 	_, err = ReadFeedFrame(bytes.NewReader(hdr))
 	if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("expected truncation EOF for boundary length, got %v", err)
@@ -251,11 +249,37 @@ func TestResumeRoundTrip(t *testing.T) {
 	}
 }
 
-// TestNoOverflowOnLargePayload verifies the 3-byte length encoding
-// boundary at exactly the maximum representable value.
+// TestNoOverflowOnLargePayload verifies that MaxFeedPayload is exactly
+// the maximum value representable in the 3-byte length field. Prior to
+// the v0.1.1 fix, MaxFeedPayload was 16*1024*1024 (0x1000000) — one
+// byte beyond the 3-byte cap — so a payload of exactly MaxFeedPayload
+// bytes silently encoded length=0 and desynced the stream.
 func TestNoOverflowOnLargePayload(t *testing.T) {
 	const max3byte = 0xFFFFFF
-	if max3byte != MaxFeedPayload-1 {
-		t.Fatalf("MaxFeedPayload should be 16 MiB to match 3-byte length encoding")
+	if max3byte != MaxFeedPayload {
+		t.Fatalf("MaxFeedPayload (%d) must equal max-3-byte (%d) so length encoding never truncates", MaxFeedPayload, max3byte)
+	}
+}
+
+// TestMaxFeedPayloadBoundaryRoundTrip verifies that a payload of exactly
+// MaxFeedPayload bytes round-trips correctly — encoder writes the full
+// 3-byte length, decoder reads it back, no truncation.
+func TestMaxFeedPayloadBoundaryRoundTrip(t *testing.T) {
+	payload := make([]byte, MaxFeedPayload)
+	payload[0] = 0xAB
+	payload[len(payload)-1] = 0xCD
+	var buf bytes.Buffer
+	if err := WriteFeedFrame(&buf, TypeKeyframe, 1, 2, FlagKeyframe, payload); err != nil {
+		t.Fatalf("write at boundary: %v", err)
+	}
+	f, err := ReadFeedFrame(&buf)
+	if err != nil {
+		t.Fatalf("read at boundary: %v", err)
+	}
+	if len(f.Payload) != MaxFeedPayload {
+		t.Fatalf("payload len got %d want %d", len(f.Payload), MaxFeedPayload)
+	}
+	if f.Payload[0] != 0xAB || f.Payload[MaxFeedPayload-1] != 0xCD {
+		t.Fatalf("payload bytes corrupted at boundary")
 	}
 }

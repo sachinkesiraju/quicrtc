@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -134,12 +135,16 @@ type Config struct {
 	OnKeyframeRequest func(sessionID, trackName string)
 
 	// OnSession, if non-nil, is invoked once per accepted session
-	// after the handshake completes. The SessionHandle exposes
-	// per-session capabilities (currently: datagram send/receive)
-	// so applications can implement kind-aware behaviors like
-	// telemetry-over-datagrams without changes to the core pump
-	// dispatch. The callback runs on the session goroutine; long-
-	// running work should spawn its own goroutine.
+	// after the HELLO handshake completes — i.e., the peer has
+	// authenticated and SessionID is populated. The SessionHandle
+	// exposes per-session capabilities (datagram send/receive, inbound
+	// PublishBack track read) so applications can implement kind-aware
+	// behaviors without changes to the core pump dispatch.
+	//
+	// The callback runs on the session goroutine; long-running work
+	// should spawn its own goroutine. Note: prior to v0.1.1 this
+	// callback fired pre-handshake against an unauthenticated peer;
+	// the contract was tightened to fire post-authentication only.
 	OnSession func(h SessionHandle)
 
 	// InboundRateLimit caps inbound (PublishBack) traffic per session.
@@ -420,6 +425,11 @@ func (s *Server) AddTrackWithPriority(name string, priority uint8) *Publisher {
 // datagrams, KindToolCalls through one bidi stream per call, etc.
 // Zero-Kind (or KindVideo) preserves the legacy stream-per-GOP path.
 //
+// Priority handling: spec.Priority's zero value (0) is treated as
+// "use the Kind's default" via track.DefaultPriority. This lets callers
+// register audio tracks at PriorityCritical (also 0) by leaving Priority
+// unset, rather than getting silently demoted to PriorityNormal.
+//
 // Idempotent on Name; second call returns the existing Publisher and
 // ignores subsequent spec values (use RemoveTrack + AddTrackSpec to
 // change).
@@ -430,7 +440,7 @@ func (s *Server) AddTrackSpec(spec TrackSpec) *Publisher {
 	}
 	priority := spec.Priority
 	if priority == 0 {
-		priority = uint8(track.PriorityNormal)
+		priority = uint8(track.DefaultPriority(kind))
 	}
 	return s.addTrackInternal(spec.Name, kind, priority, spec.TrackID)
 }
@@ -659,7 +669,13 @@ func (s *Server) ShareLink() string {
 	if err != nil {
 		port = addr
 	}
-	return fmt.Sprintf("https://%s:%s/wt#slug=%s&hash=%s", s.host, port, s.slug, s.bundle.HashB64URL())
+	host := s.host
+	// IPv6 literals need bracket-wrapping in URLs (RFC 3986 §3.2.2).
+	// Detect by colon count: 2+ colons rules out host:port forms.
+	if strings.Count(host, ":") >= 2 && !strings.HasPrefix(host, "[") {
+		host = "[" + host + "]"
+	}
+	return fmt.Sprintf("https://%s:%s/wt#slug=%s&hash=%s", host, port, s.slug, s.bundle.HashB64URL())
 }
 
 // ListenAndServe binds the listener and runs until ctx is cancelled
@@ -875,10 +891,16 @@ func (s *Server) runSession(parent context.Context, wt *webtransport.Session) {
 	cfg.FeedConfig.DatagramSender = &wtDatagramSender{wt: wt}
 	cfg.FeedConfig.BidiOpener = &wtBidiOpener{wt: wt}
 
-	sess := session.New(cfg, ctl, &uniOpener{wt: wt})
+	// Fire OnSession only after the session has authenticated — see
+	// the Config.OnSession contract. The callback runs synchronously
+	// from session.Run on the session goroutine.
 	if s.cfg.OnSession != nil {
-		s.cfg.OnSession(SessionHandle{wt: wt, sessionID: sess.SessionID, sess: sess})
+		cfg.OnHandshakeComplete = func(sess *session.Session) {
+			s.cfg.OnSession(SessionHandle{wt: wt, sessionID: sess.SessionID, sess: sess})
+		}
 	}
+
+	sess := session.New(cfg, ctl, &uniOpener{wt: wt})
 	sess.OnAllocateID = s.store.AllocateID
 	sess.OnResume = func(tenant, id string, lastSeen map[string]uint32) (map[string]*pubsub.Receiver, bool) {
 		recvs := s.store.Resume(tenant, id)

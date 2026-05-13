@@ -17,14 +17,9 @@
 //	├──────────────┼─────────────────────┼───────────────────────────────────┤
 //	│ screen       │ KindVideo           │ stream-per-GOP uni stream         │
 //	│ reasoning    │ KindTokens          │ persistent low-latency uni stream │
-//	│ actions      │ KindTokens (*)      │ persistent low-latency uni stream │
+//	│ actions      │ KindToolCalls       │ fresh bidi stream per AU          │
 //	│ telemetry    │ datagrams           │ unreliable QUIC datagrams         │
 //	└──────────────┴─────────────────────┴───────────────────────────────────┘
-//	(*) KindToolCalls is the architectural fit (DeliveryBidiPerCall)
-//	    but ts-sdk doesn't accept incoming bidi streams yet. Using
-//	    KindTokens keeps both the Go CLI viewer and the browser
-//	    viewer wired. Switch when ts-sdk grows
-//	    incomingBidirectionalStreams.
 //
 // What this teaches (verified by reading the code, not assumed):
 //
@@ -134,8 +129,7 @@ func main() {
 	// the right wire shape.
 	screen := srv.AddTrackSpec(server.TrackSpec{Name: trackScreen, Kind: track.KindVideo})
 	reasoning := srv.AddTrackSpec(server.TrackSpec{Name: trackReasoning, Kind: track.KindTokens})
-	// KindTokens until ts-sdk grows incoming-bidi accept; see (*) note above.
-	actions := srv.AddTrackSpec(server.TrackSpec{Name: trackActions, Kind: track.KindTokens})
+	actions := srv.AddTrackSpec(server.TrackSpec{Name: trackActions, Kind: track.KindToolCalls})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
@@ -289,8 +283,9 @@ func pumpReasoning(ctx context.Context, pub *server.Publisher, st *status.Status
 // ── actions: JSON tool-calls, ~0.5 Hz ─────────────────────────
 //
 // HARDCODED CONTENT — cycles through a fixed list of plausible
-// CUA tool calls. Wire shape is real (persistent low-latency uni
-// stream distinct from screen and reasoning); content is not.
+// CUA tool calls. Wire shape is real (fresh bidi stream per AU via
+// KindToolCalls, so parallel tool calls don't HOL-block); content
+// is not.
 func pumpActions(ctx context.Context, pub *server.Publisher, st *status.Status) {
 	actions := []string{
 		`{"tool":"screenshot"}`,

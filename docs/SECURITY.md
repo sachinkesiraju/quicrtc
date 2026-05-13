@@ -43,7 +43,7 @@ In scope:
 - The Go library (`server/`, `client/`, `session/`, `wire/`,
   `feed/`, etc.).
 - The TypeScript SDK (`ts-sdk/`).
-- The wire protocol itself (see [`docs/spec.md`](docs/spec.md)).
+- The wire protocol itself (see [`spec.md`](spec.md)).
 
 Out of scope:
 

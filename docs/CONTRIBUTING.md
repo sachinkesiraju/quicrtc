@@ -7,7 +7,7 @@ Wire format is stable; public APIs may shift before v1.0.
 ```bash
 git clone https://github.com/sachinkesiraju/quicrtc.git
 cd quicrtc
-go build ./...           # Go 1.25+ required
+go build ./...           # Go 1.26+ recommended (1.25+ works for core library)
 cd ts-sdk && npm install # Node 18+ required
 ```
 
@@ -38,7 +38,7 @@ go test -v -p 1 ./benchmarks/... -timeout=600s
 `-p 1` keeps the heavy benchmark subpackages from competing for CPU.
 
 CI runs all of the above on every PR (see
-[`.github/workflows/test.yml`](.github/workflows/test.yml)).
+[`.github/workflows/test.yml`](../.github/workflows/test.yml)).
 
 ## What we accept
 
@@ -98,4 +98,4 @@ small bug fixes, the PR description is enough.
 
 By contributing, you agree your contribution is licensed under the
 Apache License 2.0, the same as the rest of the project. See
-[`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
+[`LICENSE`](../LICENSE).

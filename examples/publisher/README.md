@@ -47,7 +47,7 @@ or pipe, so log files stay clean.
 
 ## What to read next
 
-- [`../subscriber`](../subscriber/) — paste the share URL into this.
-- [`../datachannel`](../datachannel/) — the bidi control-channel pattern.
-- [`../agent_pubsub`](../agent_pubsub/) — multi-track + datagrams + keyframe recovery.
-- [`../../ts-sdk/examples/viewer`](../../ts-sdk/examples/viewer/) — paste the share URL into a browser.
+- subscriber — paste the share URL into this.
+- datachannel — the bidi control-channel pattern.
+- agent_pubsub — multi-track + datagrams + keyframe recovery.
+- ts-sdk/examples/viewer — paste the share URL into a browser.

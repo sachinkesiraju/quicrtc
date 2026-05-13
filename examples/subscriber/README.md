@@ -47,6 +47,6 @@ the summary calls out — it isn't a wire defect.
 
 ## What to read next
 
-- [`../relay`](../relay/) — same wire, with 1:N fan-out.
-- [`../agent_pubsub/viewer`](../agent_pubsub/viewer/) — multi-track CLI viewer.
-- [`../../ts-sdk/examples/viewer`](../../ts-sdk/examples/viewer/) — the browser equivalent of this example.
+- relay — same wire, with 1:N fan-out.
+- agent_pubsub/viewer — multi-track CLI viewer.
+- ts-sdk/examples/viewer — the browser equivalent of this example.

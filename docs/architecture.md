@@ -5,8 +5,7 @@ quicrtc is a single transport — native QUIC + WebTransport — under a
 publisher↔subscriber sessions and for relayed 1:N fan-out via the
 `relay` package.
 
-For the wire format, see [`spec.md`](spec.md). For planned work, see
-[`roadmap.md`](roadmap.md).
+For the wire format, see [`spec.md`](spec.md).
 
 ## Why a new transport
 

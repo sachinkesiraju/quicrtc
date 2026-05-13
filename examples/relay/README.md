@@ -58,7 +58,7 @@ two more subscriber terminals to watch the count tick from 1 → 2 → 3.
 
 ## What to read next
 
-- [`../agent_pubsub`](../agent_pubsub/) — multi-track flow that exercises
+- agent_pubsub — multi-track flow that exercises
   the same fan-out machinery under load.
-- [`../../ts-sdk/examples/viewer`](../../ts-sdk/examples/viewer/) — open
+- ts-sdk/examples/viewer — open
   the browser viewer against the relay's URL to confirm transparency.

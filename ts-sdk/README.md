@@ -100,30 +100,29 @@ dc.onMessage((data) => { /* ... */ });
 
 ## Wire codec performance
 
-The wire-format implementation is allocation-free on the hot path.
-Reproduce with `npm run bench`.
+Allocation-free on the hot path. Reproduce with `npm run bench`:
 
-| Operation                                | Time per op  | Allocations |
-|------------------------------------------|--------------|-------------|
-| Control frame encode                     | ~0.1 µs      | 0           |
-| Feed frame encode (1KB payload)          | ~0.3 µs      | 0           |
-| Datagram envelope encode (64B)           | ~0.1 µs      | 0           |
-| Datagram envelope decode                 | <0.1 µs      | 0           |
-| Backpressure marshal (with needs_keyframe) | ~0.2 µs    | 0           |
-| HELLO / SDP JSON marshal+unmarshal       | ~0.4 µs each | 0           |
+- Control frame encode — **~0.1 µs**
+- Feed frame encode (1 KB payload) — **~0.3 µs**
+- Datagram envelope encode (64 B) — **~0.1 µs**
+- Datagram envelope decode — **<0.1 µs**
+- Backpressure marshal (with `needs_keyframe`) — **~0.2 µs**
+- HELLO / SDP JSON marshal + unmarshal — **~0.4 µs each**
 
-End-to-end numbers (Go server side) are in the repo's
-[`benchmarks/`](../benchmarks/) suite.
+End-to-end numbers (Go server side) live in the repo's
+benchmarks suite.
 
 ## Browser support
+
+> **Note:** WebTransport is an evolving web standard. Browser support and implementation details may change.
 
 | Browser     | WebTransport | Status                  |
 |-------------|--------------|-------------------------|
 | Chrome 114+ | Native       | Full                    |
 | Edge 114+   | Native       | Full                    |
-| Safari 26.4+ (iOS / macOS) | Native | Full              |
+| Safari 18+ (iOS / macOS) | Experimental | Enable `WebTransport` in Develop menu; full support coming in future versions |
 | Firefox     | Behind flag  | Enable `network.webtransport.enabled` |
 
 ## License
 
-Apache 2.0 — see [LICENSE](../LICENSE) and [NOTICE](../NOTICE).
+Apache 2.0 — see [LICENSE](../LICENSE).

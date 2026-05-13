@@ -61,6 +61,6 @@ bidi channel, not request/reply.
 
 ## What to read next
 
-- [`../publisher`](../publisher/) + [`../subscriber`](../subscriber/) — the track-based primitive.
-- [`../agent_pubsub`](../agent_pubsub/) — multi-track + datachannel together.
-- [`../../ts-sdk/examples/viewer`](../../ts-sdk/examples/viewer/) — pasting this server's URL into the viewer surfaces the datachannel transcript box.
+- publisher + subscriber — the track-based primitive.
+- agent_pubsub — multi-track + datachannel together.
+- ts-sdk/examples/viewer — pasting this server's URL into the viewer surfaces the datachannel transcript box.

@@ -315,7 +315,7 @@ sudo tc qdisc del dev eth0 root
 ## What this example is NOT
 
 - A microbenchmark of the QUIC stack itself (use
-  [`benchmarks/`](../../benchmarks/) for that).
+  benchmarks for that).
 - A real CUA agent. A real agent (Puppeteer / Playwright / browser
   automation + an LLM loop) is an application that *builds on* this
   library; build one by wiring your agent's action loop to this
@@ -324,12 +324,12 @@ sudo tc qdisc del dev eth0 root
 
 ## What to read next
 
-- [`../agent_pubsub/`](../agent_pubsub/) — the same multi-Kind wire
+- agent_pubsub — the same multi-Kind wire
   shape without the comparison, paired with the browser viewer for
   the visual experience.
-- [`../../benchmarks/`](../../benchmarks/) — microbenchmarks of
+- benchmarks — microbenchmarks of
   individual delivery classes (`StreamGOP`, `StreamLowLatency`,
   `BidiPerCall`) in isolation.
-- [`../../ts-sdk/examples/viewer/`](../../ts-sdk/examples/viewer/) —
+- ts-sdk/examples/viewer —
   point the browser viewer at a `-mode=multistream` server to see
   the screen track render real pixels live.

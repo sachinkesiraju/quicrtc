@@ -4,7 +4,7 @@ Browser examples for the `quicrtc` package. There's one example right now,
 and it's deliberately the *only* example because it covers the full
 SDK surface:
 
-## [`viewer/`](viewer/) — universal browser viewer
+## viewer — universal browser viewer
 
 A framework-free HTML page that connects to **any** quicrtc Go server
 via a pasted share URL, inspects the announced remote tracks, and
@@ -24,6 +24,6 @@ Error` and a backpressure indicator that lights up when the SDK fires
 screen AUs until level returns to 0).
 
 One viewer, many servers — point it at any Go example under
-[`../../examples/`](../../examples/) and the right panels light up.
+examples and the right panels light up.
 
-See [`viewer/README.md`](viewer/README.md) for setup + run instructions.
+See viewer/README.md for setup + run instructions.

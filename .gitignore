@@ -3,6 +3,11 @@
 *.out
 /bin/
 *.prof
+# compiled output of `go build ./testing/wan_bench/` (the cmd
+# produces a binary named after the directory, by convention at
+# repo root)
+/wan_bench
+/wan_bench-linux-amd64
 
 # JS / TypeScript
 node_modules/

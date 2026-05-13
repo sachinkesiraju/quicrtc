@@ -12,8 +12,8 @@ session telemetry datagrams — all on **one QUIC connection**.
 > **What is mocked:** the agent itself. Reasoning sentences are
 > hardcoded; tool calls cycle through a fixed list. No model runs.
 >
-> **Where the multistream advantage is *measured*:** in
-> [`../cua/`](../cua/) — not here. This example shows the SHAPE; that
+> **Where the multistream advantage is *measured**:** in
+> cua — not here. This example shows the SHAPE; that
 > example prints the numbers.
 
 ## Tracks
@@ -25,12 +25,10 @@ session telemetry datagrams — all on **one QUIC connection**.
 | `actions`   | `KindTokens` (\*)     | 0.5 Hz, JSON  | persistent low-latency uni stream                           |
 | `telemetry` | datagrams             | 2 Hz, tiny    | unreliable QUIC datagrams (4-byte envelope)                 |
 
-(\*) `KindToolCalls` is the natural fit but routes via
-`DeliveryBidiPerCall`, which requires a client that accepts bidi
-streams. The Go client doesn't yet, so `actions` uses `KindTokens` to
-keep both the Go CLI viewer and the browser viewer reachable. The
-per-Kind dispatch teaching point still lands — `actions` rides a
-distinct persistent uni stream, not the screen GOP stream.
+(\*) `KindToolCalls` is the architectural fit, and the Go client
+accepts incoming bidi streams. ts-sdk doesn't yet, so this example
+uses `KindTokens` to keep the browser viewer wired. Switch when
+ts-sdk grows `incomingBidirectionalStreams`.
 
 ## What this teaches
 
@@ -66,7 +64,7 @@ go run ./examples/agent_pubsub/viewer 'https://127.0.0.1:NNNN/wt#slug=...&hash=.
 ```
 
 For the **visual** experience paste the share URL into the browser
-viewer: [`../../ts-sdk/examples/viewer`](../../ts-sdk/examples/viewer/).
+viewer: ts-sdk/examples/viewer.
 
 ## Expected output (CLI viewer)
 
@@ -100,15 +98,15 @@ making progress concurrently on one connection.
 ## What this does NOT prove
 
 - That the per-Kind dispatch is **measurably** faster than a naive
-  single-track shape. That's [`../cua/`](../cua/)'s job — it prints
+  single-track shape. That's cua's job — it prints
   actual p50/p95/max numbers comparing naive vs multistream dispatch
   on the same workload.
 
 ## What to read next
 
-- [`../cua`](../cua/) — deterministic CUA workload with measured
+- cua — deterministic CUA workload with measured
   naive-vs-multistream latency comparison.
-- [`../../ts-sdk/examples/viewer`](../../ts-sdk/examples/viewer/) —
+- ts-sdk/examples/viewer —
   browser companion. Renders the screen track as actual pixels.
-- [`../relay`](../relay/) — front this server with a relay; the viewer
+- relay — front this server with a relay; the viewer
   can't tell the difference.

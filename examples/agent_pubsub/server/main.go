@@ -20,13 +20,11 @@
 //	│ actions      │ KindTokens (*)      │ persistent low-latency uni stream │
 //	│ telemetry    │ datagrams           │ unreliable QUIC datagrams         │
 //	└──────────────┴─────────────────────┴───────────────────────────────────┘
-//	(*) KindToolCalls is the natural fit for `actions` but routes via
-//	    DeliveryBidiPerCall, which requires a client that accepts bidi
-//	    streams. The Go client doesn't yet, so this example uses
-//	    KindTokens for actions to keep BOTH the Go CLI viewer AND the
-//	    browser viewer reachable. The per-Kind dispatch teaching point
-//	    still lands — actions ride a persistent uni stream distinct
-//	    from screen's per-GOP stream and reasoning's own stream.
+//	(*) KindToolCalls is the architectural fit (DeliveryBidiPerCall)
+//	    but ts-sdk doesn't accept incoming bidi streams yet. Using
+//	    KindTokens keeps both the Go CLI viewer and the browser
+//	    viewer wired. Switch when ts-sdk grows
+//	    incomingBidirectionalStreams.
 //
 // What this teaches (verified by reading the code, not assumed):
 //
@@ -136,10 +134,7 @@ func main() {
 	// the right wire shape.
 	screen := srv.AddTrackSpec(server.TrackSpec{Name: trackScreen, Kind: track.KindVideo})
 	reasoning := srv.AddTrackSpec(server.TrackSpec{Name: trackReasoning, Kind: track.KindTokens})
-	// See the table at top of file: actions wants KindToolCalls but
-	// settles for KindTokens until the Go client supports bidi
-	// streams. The per-Kind point still lands — actions ride a
-	// distinct persistent uni stream, not the screen GOP stream.
+	// KindTokens until ts-sdk grows incoming-bidi accept; see (*) note above.
 	actions := srv.AddTrackSpec(server.TrackSpec{Name: trackActions, Kind: track.KindTokens})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

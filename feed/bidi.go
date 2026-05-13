@@ -95,6 +95,21 @@ func (p *Pump) runBidiPerCall(ctx context.Context, recv *pubsub.Receiver) error 
 				return
 			}
 
+			// Prepend a TypeStreamHeader so the receiver can route
+			// this bidi stream to the right track queue. Mirrors the
+			// uni-stream path in pump.go. Empty TrackName preserves
+			// single-track wire compat (receivers route to "primary").
+			if p.cfg.TrackName != "" {
+				if err := wire.WriteStreamHeader(stream, p.cfg.TrackName); err != nil {
+					stream.CancelWrite(0)
+					stream.CancelRead(0)
+					if p.cfg.OnAUDropped != nil {
+						p.cfg.OnAUDropped("bidi_header_failed")
+					}
+					return
+				}
+			}
+
 			// Send request: feed-frame envelope so the receiver can
 			// parse it the same way as stream-based AUs.
 			flags := wire.FlagKeyframe

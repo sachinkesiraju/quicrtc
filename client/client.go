@@ -277,11 +277,13 @@ func Dial(ctx context.Context, rawURL string, opts Options) (*Client, error) {
 		return nil, err
 	}
 	go c.controlReader()
-	// feedAcceptor runs for the session's lifetime, NOT the caller's
-	// dial ctx. Otherwise `context.WithTimeout(ctx, 5s); defer cancel()`
-	// on the caller would tear down the wire reader the instant the
-	// dial timeout fired, silently losing all subsequent inbound AUs.
+	// feedAcceptor / bidiAcceptor run for the session's lifetime, NOT
+	// the caller's dial ctx. Otherwise `context.WithTimeout(ctx, 5s);
+	// defer cancel()` on the caller would tear down the wire readers
+	// the instant the dial timeout fired, silently losing all
+	// subsequent inbound AUs.
 	go c.feedAcceptor(c.sessionCtx)
+	go c.bidiAcceptor(c.sessionCtx)
 	return c, nil
 }
 
@@ -733,6 +735,69 @@ func (c *Client) feedAcceptor(ctx context.Context) {
 			return
 		}
 		go c.drainFeed(stream)
+	}
+}
+
+// bidiAcceptor accepts bidi streams the publisher opens for the
+// BidiPerCall delivery class (KindToolCalls). Each accepted stream
+// carries a TypeStreamHeader + one feed frame; we queue the AU on
+// the per-track channel so Client.RecvOn returns BidiPerCall AUs
+// the same way it returns uni-stream AUs. We don't write a response
+// today — wire shape supports it; API surface for that lands when
+// a consumer needs it.
+func (c *Client) bidiAcceptor(ctx context.Context) {
+	for {
+		select {
+		case <-c.closed:
+			return
+		default:
+		}
+		stream, err := c.wt.AcceptStream(ctx)
+		if err != nil {
+			// feedAcceptor surfaces the transport error; we exit quietly.
+			return
+		}
+		go c.drainBidi(stream)
+	}
+}
+
+func (c *Client) drainBidi(stream *webtransport.Stream) {
+	// FIN our send half so the server's io.ReadAll returns. Without
+	// this, the server blocks per call until BidiCallTimeout (30s)
+	// and leaks a goroutine. Stream.Close() FINs send only — same
+	// convention as wtBidiStream.CloseWrite in server/server.go.
+	defer func() { _ = stream.Close() }()
+
+	// Same shape as drainFeed. BidiPerCall sends one feed-frame per
+	// stream then FINs; the loop handles that and any future stream
+	// that carries multiple frames.
+	trackName, firstByte, err := wire.PeekStreamHeader(stream)
+	if err != nil {
+		return
+	}
+	var src io.Reader = stream
+	if trackName == "" {
+		trackName = "primary"
+		src = &peekedReader{first: firstByte, rest: stream}
+	}
+	ch := c.trackChan(trackName)
+	for {
+		f, err := wire.ReadFeedFrame(src)
+		if err != nil {
+			return
+		}
+		au := pubsub.AccessUnit{
+			Bytes:         f.Payload,
+			Keyframe:      f.IsKeyframe(),
+			PTSMicro:      f.PTSMicro,
+			Seq:           f.Seq,
+			Discontinuity: (f.Flags & wire.FlagDiscontinuity) != 0,
+		}
+		select {
+		case ch <- au:
+		case <-c.closed:
+			return
+		}
 	}
 }
 

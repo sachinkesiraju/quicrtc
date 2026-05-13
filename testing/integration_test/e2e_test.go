@@ -17,6 +17,7 @@ import (
 	"github.com/sachinkesiraju/quicrtc/datachannel"
 	"github.com/sachinkesiraju/quicrtc/pubsub"
 	"github.com/sachinkesiraju/quicrtc/server"
+	"github.com/sachinkesiraju/quicrtc/track"
 	"github.com/sachinkesiraju/quicrtc/wire"
 )
 
@@ -253,5 +254,78 @@ func TestEndToEndConcurrentSubscribers(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("not all subscribers received their share")
+	}
+}
+
+// TestEndToEndBidiPerCall verifies KindToolCalls round-trips through
+// the public client API: server opens one bidi QUIC stream per AU;
+// client bidiAcceptor accepts, demuxes by TypeStreamHeader, queues
+// to the per-track channel RecvOn reads from. Pump-layer coverage
+// (feed/bidi_bench_test.go::TestBidiPerCallIsolation) uses fake
+// streams; this exercises the real QUIC path.
+func TestEndToEndBidiPerCall(t *testing.T) {
+	s, _ := startServer(t, server.Config{})
+	c := dialClient(t, s)
+
+	const trackName = "tool_calls"
+	pub := s.AddTrackSpec(server.TrackSpec{
+		Name: trackName,
+		Kind: track.KindToolCalls,
+	})
+
+	// Give the server's AttachTrack a moment to propagate the track
+	// to the active session (AttachTrack is async).
+	time.Sleep(50 * time.Millisecond)
+
+	const n = 8
+	go func() {
+		for i := 0; i < n; i++ {
+			au := pubsub.AccessUnit{
+				Bytes:    []byte{byte(i), 0xCA, 0xFE, 0xBA, 0xBE},
+				Keyframe: true, // each tool call is self-contained
+				Seq:      uint32(i),
+				PTSMicro: uint64(i) * 1000,
+			}
+			_ = pub.Publish(context.Background(), au)
+			// Pace slightly so the bidi streams don't all open in
+			// the same scheduler tick.
+			time.Sleep(5 * time.Millisecond)
+		}
+	}()
+
+	got := make([]pubsub.AccessUnit, 0, n)
+	deadline := time.Now().Add(5 * time.Second)
+	for len(got) < n && time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		au, err := c.RecvOn(ctx, trackName)
+		cancel()
+		if err != nil {
+			t.Logf("RecvOn: %v (have %d)", err, len(got))
+			continue
+		}
+		got = append(got, au)
+	}
+	if len(got) != n {
+		t.Fatalf("received %d/%d KindToolCalls AUs", len(got), n)
+	}
+
+	// Bidi streams race each other, so arrival order isn't
+	// guaranteed. Verify by sequence numbers we got each one
+	// exactly once.
+	seen := make(map[uint32]bool, n)
+	for _, au := range got {
+		if seen[au.Seq] {
+			t.Errorf("duplicate AU seq=%d", au.Seq)
+		}
+		seen[au.Seq] = true
+		// Payload sanity: first byte = seq, rest is the marker.
+		if len(au.Bytes) != 5 || au.Bytes[0] != byte(au.Seq) {
+			t.Errorf("seq=%d payload corrupted: %x", au.Seq, au.Bytes)
+		}
+	}
+	for i := uint32(0); i < n; i++ {
+		if !seen[i] {
+			t.Errorf("missing seq=%d", i)
+		}
 	}
 }

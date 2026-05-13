@@ -33,7 +33,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"github.com/sachinkesiraju/quicrtc/benchmarks/internal/loadgen"
+	"github.com/sachinkesiraju/quicrtc/testing/benchmarks/internal/loadgen"
 	"github.com/sachinkesiraju/quicrtc/pubsub"
 	"github.com/sachinkesiraju/quicrtc/track"
 )

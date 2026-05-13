@@ -15,19 +15,19 @@ Topologies:
 - WebRTC: one PeerConnection, one ordered+reliable data channel
 - quicrtc: native PeerConnection
 
-| Metric                      | pion    | quicrtc   | Advantage     |
-|-----------------------------|---------|-----------|---------------|
-| Setup latency p50           | 47 ms   | 6.2 ms    | **7.5×**      |
-| Setup latency p99           | 63 ms   | 6.8 ms    | **9.3×**      |
-| Token e2e p99 (200/sec, 64B) | 289 µs | 275 µs    | tied          |
-| Inter-arrival jitter p99    | 6.22 ms | 6.21 ms   | tied          |
-| Delivery rate               | 100%    | 100%      | tied          |
+| Metric                       | pion     | quicrtc  | Advantage   |
+|------------------------------|----------|----------|-------------|
+| Setup latency p50            | 138 ms   | 0.83 ms  | **165×**    |
+| Setup latency p99            | 141 ms   | 1.44 ms  | **98×**     |
+| Token e2e p99 (200/sec, 64B) | 289 µs   | 275 µs   | tied        |
+| Inter-arrival jitter p99     | 6.22 ms  | 6.21 ms  | tied        |
+| Delivery rate                | 100%     | 100%     | tied        |
 
 Setup latency is dominated by ICE candidate gathering + DTLS on
 WebRTC. Per-message latency is near-tied because a single ordered
 channel has no architectural pressure on either protocol. For
 **time-to-first-token** — the load-bearing UX metric for chat apps —
-quicrtc is ~40 ms faster on cold start.
+quicrtc is ~137 ms faster on cold start.
 
 ## Use case 2: multi-modal agent (1:1)
 
@@ -42,12 +42,12 @@ Topologies:
 - quicrtc: native PeerConnection, DataChannel for tokens, AU pipeline
   for video
 
-| Metric              | pion canonical | pion parallel | quicrtc   | Advantage                                |
-|---------------------|----------------|---------------|-----------|------------------------------------------|
-| **Token e2e p99**   | **1,441 µs**   | 480 µs        | **280 µs** | **5.1× vs canonical**, 1.7× vs parallel |
-| Video e2e p99       | 3.05 ms        | 3.20 ms       | **1.87 ms** | **1.6× faster**                          |
-| Token IA jitter p99 | 6.24 ms        | 6.21 ms       | 6.21 ms   | tied                                     |
-| Delivery (both)     | 100%           | 100%          | 100%      | tied                                     |
+| Metric              | pion canonical | pion parallel | quicrtc     | Advantage                              |
+|---------------------|----------------|---------------|-------------|----------------------------------------|
+| **Token e2e p99**   | **1,958 µs**   | 374 µs        | **365 µs**  | **5.4× vs canonical**, tied vs parallel |
+| Video e2e p99       | 3.21 ms        | 3.38 ms       | **1.84 ms** | **1.7× faster**                        |
+| Token IA jitter p99 | 6.30 ms        | 6.26 ms       | 6.20 ms     | tied                                   |
+| Delivery (both)     | 100%           | 100%          | 100%        | tied                                   |
 
 WebRTC data channels share a single SCTP-over-DTLS association. When
 the video channel bursts a 50KB chunk, that chunk's SCTP segments
@@ -73,9 +73,9 @@ N=4 subscribers, 60 frames × 50KB:
 
 | Metric                                  | pion SFU | quicrtc relay | Advantage   |
 |-----------------------------------------|----------|---------------|-------------|
-| **Worst-subscriber e2e p99**            | 7.83 ms  | **4.94 ms**   | **1.6×**    |
-| **Mean per-subscriber p99**             | 7.50 ms  | **3.95 ms**   | **1.9×**    |
-| Best-subscriber e2e p99                 | 7.16 ms  | 2.94 ms       | 2.4×        |
+| **Worst-subscriber e2e p99**            | 8.42 ms  | **4.62 ms**   | **1.8×**    |
+| **Mean per-subscriber p99**             | 8.12 ms  | **4.40 ms**   | **1.8×**    |
+| Best-subscriber e2e p99                 | 7.91 ms  | 3.98 ms       | 2.0×        |
 | Delivery rate                           | 100%     | 100%          | tied        |
 
 Each leg of pion's SFU is a full WebRTC stack hop — DTLS-encrypted

@@ -61,18 +61,18 @@ performance table pulls headline rows from these.
 
 Each subpackage under `benchmarks/` is one topic:
 
-| Subpackage          | Test(s)                                                  | Asks                                                                     |
-|---------------------|----------------------------------------------------------|--------------------------------------------------------------------------|
-| `agent/`            | `TestApp1ComputerUseClosedLoop`                          | action→DOM RTT p99 under 4 concurrent tracks                             |
-| `video/`            | `TestKeyframeRecoveryComparison`                         | Time-to-fresh-frame after loss, with vs. without subscriber-driven request |
-| `tokens/`           | `TestTokenStreamingVsSSE`                                | quicrtc StreamLowLatency vs. SSE-over-HTTP/2                             |
-| `telemetry/`        | `TestDatagramVsStreamContention`                         | Datagram telemetry vs. stream telemetry during video burst               |
-| `multimodal/`       | `TestMultimodalIsolation{PionParallel,PionShared,QuicrtcNative,QuicrtcMultiTrack}` | Token p99 during concurrent video burst                                  |
-| `fanout/`           | `TestLiveBroadcast{PionSFU,QuicrtcRelay}`, `TestRelayOverhead` | Per-subscriber p99 at N=4, plus paired native-vs-relayed overhead        |
-| `resume/`           | `TestResumeComparison`                                   | Three-way: quicrtc resume, WebRTC ICE restart, WebRTC full reconnect     |
-| `network/`          | `TestNetworkGrid_*`                                      | Same workloads across 3 RTTs × 2 loss rates                              |
-| `internal/loadgen/` | (helpers, no tests)                                      | Shared `Pair`, `NetCond`, `UDPProxy`, payload codec, stats               |
-| `browser/`          | (separate Go submodule)                                  | Chrome-driver end-to-end with the ts-sdk viewer                          |
+| Subpackage | Test(s) | Asks |
+|---|---|---|
+| `agent/` | `TestApp1ComputerUseClosedLoop` | action→DOM RTT p99, 4 concurrent tracks |
+| `video/` | `TestKeyframeRecoveryComparison` | Time-to-fresh-frame after loss |
+| `tokens/` | `TestTokenStreamingVsSSE` | StreamLowLatency vs. SSE-over-HTTP/2 |
+| `telemetry/` | `TestDatagramVsStreamContention` | Datagram vs. stream during video burst |
+| `multimodal/` | `TestMultimodalIsolation_*` | Token p99 during concurrent video burst |
+| `fanout/` | `TestLiveBroadcast_*`, `TestRelayOverhead` | Per-sub p99 at N=4; relay overhead |
+| `resume/` | `TestResumeComparison` | Resume vs. ICE restart vs. full reconnect |
+| `network/` | `TestNetworkGrid_*` | Workloads across 3 RTTs × 2 loss rates |
+| `internal/loadgen/` | (helpers) | Shared `Pair`, `NetCond`, `UDPProxy`, stats |
+| `browser/` | (Go submodule) | Chrome-driver E2E with ts-sdk viewer |
 
 ## Running them
 

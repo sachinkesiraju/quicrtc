@@ -22,6 +22,24 @@ jobs:
           go-version: ${{ matrix.go }}
           cache: true
 
+      # macOS ships with a small UDP socket-buffer cap
+      # (kern.ipc.maxsockbuf ~= 6 MiB on GitHub runners). quic-go asks
+      # for 7 MiB; under heavy bursty workloads (e.g. the 120 Mbps
+      # screen track in the agent benchmark) the kernel drops UDP
+      # packets at the socket layer before quic-go's loss recovery
+      # can see them. This is the fix quic-go upstream documents:
+      # https://github.com/quic-go/quic-go/wiki/UDP-Buffer-Sizes
+      - name: Bump UDP socket buffer (macOS)
+        if: runner.os == 'macOS'
+        # GitHub macOS runners cap kern.ipc.maxsockbuf at ~6 MiB and reject
+        # larger values with "Result too large". Apply best-effort and
+        # continue — short tests don't need the full bump to pass.
+        continue-on-error: true
+        run: |
+          sudo sysctl -w kern.ipc.maxsockbuf=6291456 || true
+          sudo sysctl -w net.inet.udp.recvspace=2097152 || true
+          sudo sysctl -w net.inet.udp.maxdgram=65535 || true
+
       - name: Build
         run: go build ./...
 
@@ -35,10 +53,10 @@ jobs:
       # benchmark package at a time, matching the pre-split semantics
       # when everything lived under a single `package benchmarks`.
       - name: Test (library)
-        run: go test $(go list ./... | grep -v '/benchmarks/') -count=1 -short -timeout=180s
+        run: go test $(go list ./... | grep -v '/testing/benchmarks/') -count=1 -short -timeout=180s
 
       - name: Test (benchmarks, serial)
-        run: go test ./benchmarks/... -count=1 -short -timeout=300s -p 1
+        run: go test ./testing/benchmarks/... -count=1 -short -timeout=300s -p 1
 
       # Race detector is Linux-only in CI: it's CPU-bound, macOS
       # runners are slower/pricier, and races surface on either
@@ -90,7 +108,7 @@ jobs:
           # noise classes for transport/wire code — Close() in cleanup
           # paths is convention, and byte(n>>16) is the canonical
           # encoding idiom. Real findings (G118, G123, …) still gate.
-          args: -exclude=G104,G115 -exclude-dir=benchmarks -exclude-dir=examples ./...
+          args: -exclude=G104,G115 -exclude-dir=testing -exclude-dir=examples ./...
 
   ts:
     name: TypeScript SDK

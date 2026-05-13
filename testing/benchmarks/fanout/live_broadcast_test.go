@@ -28,7 +28,7 @@ import (
 
 	"github.com/pion/webrtc/v4"
 
-	"github.com/sachinkesiraju/quicrtc/benchmarks/internal/loadgen"
+	"github.com/sachinkesiraju/quicrtc/testing/benchmarks/internal/loadgen"
 	"github.com/sachinkesiraju/quicrtc/cert"
 	"github.com/sachinkesiraju/quicrtc/client"
 	"github.com/sachinkesiraju/quicrtc/peerconnection"

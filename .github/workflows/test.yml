@@ -1,0 +1,119 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  go:
+    name: Go ${{ matrix.go }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        go: ['1.25', '1.26']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # Library tests run in parallel across packages (Go default).
+      # Benchmarks live in topic subpackages and exercise real QUIC
+      # loopback; cross-package parallelism makes them starve each
+      # other for CPU and inflates tail latencies. -p 1 forces one
+      # benchmark package at a time, matching the pre-split semantics
+      # when everything lived under a single `package benchmarks`.
+      - name: Test (library)
+        run: go test $(go list ./... | grep -v '/benchmarks/') -count=1 -short -timeout=180s
+
+      - name: Test (benchmarks, serial)
+        run: go test ./benchmarks/... -count=1 -short -timeout=300s -p 1
+
+      # Race detector is Linux-only in CI: it's CPU-bound, macOS
+      # runners are slower/pricier, and races surface on either
+      # platform. Run on Linux to gate, run on macOS to prove
+      # the build and short tests pass on Darwin's UDP stack.
+      - name: Test with race detector
+        if: runner.os == 'Linux'
+        run: go test -race ./feed ./wire ./session ./track ./pubsub -count=1 -timeout=240s
+
+  go-bench-smoke:
+    name: Go benchmark smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache: true
+
+      # One iteration of each benchmark to catch regressions in the
+      # benchmark setup itself; we don't gate on performance numbers
+      # in CI (hardware variance is too high), only on "does it run".
+      - name: Smoke-test benchmarks
+        run: go test ./feed -run=^$ -bench=. -benchtime=1x -timeout=120s
+
+  security:
+    name: Security scans
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          # 'stable' tracks the latest patched Go release so stdlib CVEs
+          # disappear automatically when the toolchain bumps. Pinning to
+          # a minor (e.g. '1.25') would also work but leaves a window
+          # between disclosure and the action's manifest refresh.
+          go-version: 'stable'
+          cache: true
+
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      - name: gosec
+        uses: securego/gosec@v2.26.1
+        with:
+          # G104 (unchecked errors) and G115 (int->byte overflow) are
+          # noise classes for transport/wire code — Close() in cleanup
+          # paths is convention, and byte(n>>16) is the canonical
+          # encoding idiom. Real findings (G118, G123, …) still gate.
+          args: -exclude=G104,G115 -exclude-dir=benchmarks -exclude-dir=examples ./...
+
+  ts:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ts-sdk
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: ts-sdk/package-lock.json
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Type-check
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npm test
+
+      - name: Smoke-test benchmark
+        run: npm run bench

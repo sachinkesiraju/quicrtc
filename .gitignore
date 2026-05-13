@@ -1,0 +1,20 @@
+# Go
+*.test
+*.out
+/bin/
+*.prof
+
+# JS / TypeScript
+node_modules/
+ts-sdk/dist/
+ts-sdk/node_modules/
+js/node_modules/
+js/dist/
+js/package-lock.json
+
+# editor
+.vscode/
+.idea/
+.DS_Store
+.claude/
+.devin/

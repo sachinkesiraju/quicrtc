@@ -1,0 +1,15 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+*.tgz
+
+# Keep src/ TS-only. tsc with rootDir=src + outDir=dist should put
+# compiled outputs in dist/, but guard against accidental
+# misconfigured runs that drop .js next to .ts.
+src/*.js
+src/*.js.map
+src/*.d.ts
+src/*.d.ts.map
+examples/*.js
+examples/*.js.map

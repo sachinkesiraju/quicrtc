@@ -1,0 +1,55 @@
+{
+  "name": "quicrtc",
+  "version": "0.1.0",
+  "description": "Real-time transport for AI agent sessions over QUIC/WebTransport. TypeScript client, wire-compatible with the Go server.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "clean": "rm -rf dist src/*.js src/*.js.map src/*.d.ts examples/*.js",
+    "test": "tsc && node dist/wire.test.js",
+    "bench": "tsc && node dist/benchmark.js",
+    "prepublishOnly": "npm run clean && npm run test && npm run build"
+  },
+  "keywords": [
+    "quicrtc",
+    "webtransport",
+    "quic",
+    "real-time",
+    "streaming",
+    "ai",
+    "agent",
+    "computer-use",
+    "multi-modal"
+  ],
+  "author": "Sachin Kesiraju",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sachinkesiraju/quicrtc.git",
+    "directory": "ts-sdk"
+  },
+  "bugs": {
+    "url": "https://github.com/sachinkesiraju/quicrtc/issues"
+  },
+  "homepage": "https://github.com/sachinkesiraju/quicrtc#readme",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

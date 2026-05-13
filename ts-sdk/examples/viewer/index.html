@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>quicrtc · viewer</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="bar">
+    <strong>quicrtc · viewer</strong>
+    <span class="pill" id="state-pill" data-state="disconnected">disconnected</span>
+    <span class="sid" id="sid"></span>
+    <span class="spacer"></span>
+    <button id="disconnect" class="ghost" hidden>disconnect</button>
+  </header>
+
+  <section id="connect-card" class="card connect">
+    <h2>connect</h2>
+    <p class="muted">
+      Paste the share URL printed by any quicrtc example server
+      (<code>agent_pubsub/server</code>, <code>publisher</code>, …).
+    </p>
+    <form id="connect-form">
+      <input
+        id="share-url"
+        name="share"
+        type="url"
+        placeholder="https://127.0.0.1:NNNN/wt#slug=...&amp;hash=..."
+        autocomplete="off"
+        required />
+      <button type="submit">connect</button>
+    </form>
+    <p id="connect-error" class="error" hidden></p>
+  </section>
+
+  <section id="overview" class="card" hidden>
+    <h2>session</h2>
+    <div class="chips" id="track-chips"></div>
+    <div class="muted small" id="sdp"></div>
+    <div class="muted small">
+      backpressure
+      <span id="bp-bar" class="bp-bar" data-level="0">
+        <span></span><span></span><span></span><span></span><span></span>
+      </span>
+      <span id="bp-action" class="bp-action"></span>
+    </div>
+  </section>
+
+  <main id="panels" class="panels" hidden></main>
+
+  <section id="dc-card" class="card" hidden>
+    <h2>data channel</h2>
+    <div id="dc-transcript" class="transcript"></div>
+    <form id="dc-form">
+      <input id="dc-input" type="text" placeholder="send message…" />
+      <button type="submit">send</button>
+    </form>
+  </section>
+
+  <script type="module" src="./viewer.js"></script>
+</body>
+</html>

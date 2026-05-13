@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>webrtc multimodal receiver</title></head>
+<body>
+<h1 id="status">connecting…</h1>
+<script>
+// Multi-modal WebRTC receiver. One PeerConnection with TWO data
+// channels (canonical app pattern):
+//   - "tokens" — small fast messages
+//   - "video" — large bursty messages (50KB at 30fps)
+// Both share one SCTP-over-DTLS association → cross-channel HOL.
+
+const params = new URLSearchParams(window.location.search);
+const expectTokens = parseInt(params.get("nt") || "200", 10);
+const expectVideo  = parseInt(params.get("nv") || "30", 10);
+const sigURL = params.get("sig") || "/sig";
+const reportURL = params.get("report") || "/report";
+const status = document.getElementById("status");
+
+async function main() {
+  try {
+    const pc = new RTCPeerConnection({iceServers: []});
+    const tokenRecv = []; const tokenSent = [];
+    const videoRecv = []; const videoSent = [];
+
+    pc.ondatachannel = (ev) => {
+      const dc = ev.channel;
+      dc.binaryType = "arraybuffer";
+      dc.onmessage = (m) => {
+        const now = performance.now();
+        const data = new Uint8Array(m.data);
+        const dv = new DataView(data.buffer, data.byteOffset);
+        const sent = Number(dv.getBigUint64(0, false));
+        if (dc.label === "tokens") {
+          tokenSent.push(sent); tokenRecv.push(now);
+        } else if (dc.label === "video") {
+          videoSent.push(sent); videoRecv.push(now);
+        }
+      };
+    };
+
+    pc.onicecandidate = async (ev) => {
+      if (ev.candidate) {
+        await fetch(sigURL + "?op=ice-from-browser", {
+          method: "POST",
+          headers: {"content-type": "application/json"},
+          body: JSON.stringify(ev.candidate.toJSON()),
+        });
+      }
+    };
+
+    const offerResp = await fetch(sigURL + "?op=get-offer");
+    const offer = await offerResp.json();
+    await pc.setRemoteDescription(offer);
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await fetch(sigURL + "?op=answer", {
+      method: "POST", headers: {"content-type": "application/json"},
+      body: JSON.stringify(answer),
+    });
+    (async () => {
+      while (true) {
+        const r = await fetch(sigURL + "?op=ice-from-server");
+        if (r.status === 204) return;
+        const c = await r.json();
+        try { await pc.addIceCandidate(c); } catch {}
+      }
+    })();
+
+    status.textContent = "negotiating";
+    while (tokenRecv.length < expectTokens || videoRecv.length < expectVideo) {
+      await new Promise(r => setTimeout(r, 10));
+    }
+    status.textContent = `done t=${tokenRecv.length} v=${videoRecv.length}`;
+    await fetch(reportURL, {
+      method: "POST", headers: {"content-type": "application/json"},
+      body: JSON.stringify({
+        protocol: "webrtc-mm",
+        tokenN: tokenRecv.length, videoN: videoRecv.length,
+        tokenRecvMs: tokenRecv, tokenSentNs: tokenSent,
+        videoRecvMs: videoRecv, videoSentNs: videoSent,
+      }),
+    });
+  } catch (e) {
+    status.textContent = "error: " + e.message;
+    await fetch(reportURL, {
+      method: "POST", headers: {"content-type": "application/json"},
+      body: JSON.stringify({protocol: "webrtc-mm", error: e.message || String(e)}),
+    });
+  }
+}
+main();
+</script>
+</body></html>

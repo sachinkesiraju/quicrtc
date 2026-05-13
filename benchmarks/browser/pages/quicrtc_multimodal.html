@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>quicrtc multimodal receiver</title></head>
+<body>
+<h1 id="status">connecting…</h1>
+<pre id="log"></pre>
+<script>
+// Multi-modal quicrtc receiver. Two streams concurrently:
+//   - Tokens via DataChannel (TypeData on bidi control stream)
+//   - Video via AccessUnit pipeline (uni feed streams)
+// Records arrival times for both. Reports back jitter for tokens
+// (the metric that exposes HOL blocking under multimodal load).
+
+const params = new URLSearchParams(window.location.search);
+const url    = params.get("url");
+const slug   = params.get("slug");
+const hash   = params.get("hash");
+const expectTokens = parseInt(params.get("nt") || "200", 10);
+const expectVideo  = parseInt(params.get("nv") || "30", 10);
+const reportURL = params.get("report") || "/report";
+const status = document.getElementById("status");
+
+const T_HELLO = 0x01, T_SDP = 0x02, T_DATA = 0x07;
+const T_KEYFRAME = 0x20, T_PFRAME = 0x21, T_FRAME = 0x22;
+const T_STREAM_HEADER = 0x23;
+
+function encodeControlFrame(typ, payload) {
+  const len = payload ? payload.byteLength : 0;
+  const buf = new Uint8Array(4 + len);
+  buf[0] = typ;
+  buf[1] = (len >>> 16) & 0xff;
+  buf[2] = (len >>> 8) & 0xff;
+  buf[3] = len & 0xff;
+  if (len) buf.set(new Uint8Array(payload), 4);
+  return buf;
+}
+
+class FramedReader {
+  constructor(reader, headerExtra = 0, initialBuf = null) {
+    this.reader = reader;
+    this.buf = initialBuf ? new Uint8Array(initialBuf) : new Uint8Array(0);
+    this.done = false;
+    this.headerExtra = headerExtra;
+  }
+  async _fill(min) {
+    while (this.buf.byteLength < min) {
+      let value, done;
+      try { ({value, done} = await this.reader.read()); }
+      catch (e) { this.done = true; return false; }
+      if (done) { this.done = true; return false; }
+      const merged = new Uint8Array(this.buf.byteLength + value.byteLength);
+      merged.set(this.buf, 0);
+      merged.set(value, this.buf.byteLength);
+      this.buf = merged;
+    }
+    return true;
+  }
+  async next() {
+    if (!await this._fill(4)) return null;
+    const t = this.buf[0];
+    const len = (this.buf[1] << 16) | (this.buf[2] << 8) | this.buf[3];
+    const total = 4 + this.headerExtra + len;
+    if (!await this._fill(total)) return null;
+    const extra = this.headerExtra ? this.buf.subarray(4, 4 + this.headerExtra) : null;
+    const payload = this.buf.subarray(4 + this.headerExtra, total);
+    const result = { type: t, extra: extra && new Uint8Array(extra), payload: new Uint8Array(payload) };
+    this.buf = this.buf.subarray(total);
+    return result;
+  }
+}
+
+// Mirrors wire.PeekStreamHeader. See quicrtc_receiver.html for details.
+async function peekStreamHeader(reader) {
+  let buf = new Uint8Array(0);
+  const pull = async (min) => {
+    while (buf.byteLength < min) {
+      const r = await reader.read();
+      if (r.done) return false;
+      const merged = new Uint8Array(buf.byteLength + r.value.byteLength);
+      merged.set(buf, 0);
+      merged.set(r.value, buf.byteLength);
+      buf = merged;
+    }
+    return true;
+  };
+  if (!await pull(1)) return { trackName: "", leftover: buf };
+  if (buf[0] !== T_STREAM_HEADER) return { trackName: "", leftover: buf };
+  if (!await pull(4)) throw new Error("eof in stream header length");
+  const len = (buf[1] << 16) | (buf[2] << 8) | buf[3];
+  const total = 4 + len;
+  if (!await pull(total)) throw new Error("eof in stream header name");
+  const trackName = new TextDecoder().decode(buf.subarray(4, total));
+  return { trackName, leftover: buf.subarray(total) };
+}
+
+function b64urlToBytes(s) {
+  let b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4) b64 += "=";
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+
+async function main() {
+  try {
+    const wtOpts = hash ? { serverCertificateHashes: [{algorithm: "sha-256", value: b64urlToBytes(hash)}] } : {};
+    const wt = new WebTransport(url, wtOpts);
+    await wt.ready;
+    status.textContent = "connected";
+
+    const ctl = await wt.createBidirectionalStream();
+    const writer = ctl.writable.getWriter();
+    const ctlReader = new FramedReader(ctl.readable.getReader(), 0);
+    await writer.write(encodeControlFrame(T_HELLO, new TextEncoder().encode(
+      JSON.stringify({role: "recv", slug, ver: "1"})
+    )));
+
+    // Read SDP, then concurrently:
+    //   - drain control stream for TypeData (tokens)
+    //   - drain uni streams for video AUs
+    while (true) {
+      const f = await ctlReader.next();
+      if (!f) throw new Error("ctl closed before SDP");
+      if (f.type === T_SDP) break;
+    }
+    status.textContent = "receiving";
+
+    const tokenRecv = []; const tokenSent = [];
+    const videoRecv = []; const videoSent = [];
+
+    // Token reader (control stream).
+    const tokenReader = (async () => {
+      while (tokenRecv.length < expectTokens) {
+        const f = await ctlReader.next();
+        if (!f) break;
+        if (f.type !== T_DATA) continue;
+        const now = performance.now();
+        const dv = new DataView(f.payload.buffer, f.payload.byteOffset);
+        tokenSent.push(Number(dv.getBigUint64(0, false)));
+        tokenRecv.push(now);
+      }
+    })();
+
+    // Video reader (uni streams).
+    const videoReader = (async () => {
+      const uniReader = wt.incomingUnidirectionalStreams.getReader();
+      while (videoRecv.length < expectVideo) {
+        const r = await uniReader.read();
+        if (r.done) break;
+        const stream = r.value;
+        const sr = stream.getReader();
+        // Consume the leading TypeStreamHeader (0x23) frame the
+        // server writes when the publisher names the track.
+        const { leftover } = await peekStreamHeader(sr);
+        const fr = new FramedReader(sr, 13, leftover);
+        while (videoRecv.length < expectVideo) {
+          const f = await fr.next();
+          if (!f) break;
+          if (f.type !== T_KEYFRAME && f.type !== T_PFRAME && f.type !== T_FRAME) continue;
+          const now = performance.now();
+          const dv = new DataView(f.extra.buffer, f.extra.byteOffset, 13);
+          videoSent.push(Number(dv.getBigUint64(0, false)));
+          videoRecv.push(now);
+        }
+      }
+    })();
+
+    await Promise.all([tokenReader, videoReader]);
+    status.textContent = `done t=${tokenRecv.length} v=${videoRecv.length}`;
+
+    await fetch(reportURL, {
+      method: "POST",
+      headers: {"content-type": "application/json"},
+      body: JSON.stringify({
+        protocol: "quicrtc-mm",
+        tokenN: tokenRecv.length, videoN: videoRecv.length,
+        tokenRecvMs: tokenRecv, tokenSentNs: tokenSent,
+        videoRecvMs: videoRecv, videoSentNs: videoSent,
+      }),
+    });
+  } catch (e) {
+    status.textContent = "error: " + e.message;
+    await fetch(reportURL, {
+      method: "POST", headers: {"content-type": "application/json"},
+      body: JSON.stringify({protocol: "quicrtc-mm", error: e.message || String(e)}),
+    });
+  }
+}
+main();
+</script>
+</body></html>

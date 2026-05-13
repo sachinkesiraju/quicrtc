@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>quicrtc browser receiver</title></head>
+<body>
+<h1 id="status">connecting…</h1>
+<pre id="log"></pre>
+<script>
+// Minimal browser-side quicrtc receiver. Connects via native
+// WebTransport, sends HELLO on the bidi control stream, then
+// records the arrival time of each TypeData (0x07) control frame
+// (which is how the publisher's DataChannel.Send arrives on the
+// wire). At end-of-test, POSTs the per-message latency vector
+// back to the orchestrator.
+
+const params = new URLSearchParams(window.location.search);
+const url    = params.get("url");
+const slug   = params.get("slug");
+const hash   = params.get("hash");
+const expect = parseInt(params.get("n") || "200", 10);
+const reportURL = params.get("report") || "/report";
+const log = document.getElementById("log");
+const status = document.getElementById("status");
+
+function logln(s) { log.textContent += s + "\n"; }
+
+// Wire-format constants — match wire/frame.go.
+const T_HELLO = 0x01, T_SDP = 0x02, T_DATA = 0x07;
+const T_KEYFRAME = 0x20, T_PFRAME = 0x21, T_FRAME = 0x22;
+const T_STREAM_HEADER = 0x23;
+// Feed-frame fixed header = 1B type + 3B len + 8B PTS µs + 4B seq + 1B flags = 17 bytes.
+// PTS in our payload is BigEndian uint64 nanoseconds (we use it to carry sender timestamp).
+
+function encodeControlFrame(typ, payload) {
+  const len = payload ? payload.byteLength : 0;
+  if (len > 0xffffff) throw new Error("payload too large");
+  const buf = new Uint8Array(4 + len);
+  buf[0] = typ;
+  buf[1] = (len >>> 16) & 0xff;
+  buf[2] = (len >>> 8) & 0xff;
+  buf[3] = len & 0xff;
+  if (len) buf.set(new Uint8Array(payload), 4);
+  return buf;
+}
+
+class FramedReader {
+  constructor(reader, headerExtra = 0, initialBuf = null) {
+    this.reader = reader;
+    this.buf = initialBuf ? new Uint8Array(initialBuf) : new Uint8Array(0);
+    this.done = false;
+    this.headerExtra = headerExtra; // 13 for feed frames (PTS+seq+flags), 0 for ctl
+  }
+  async _fill(min) {
+    while (this.buf.byteLength < min) {
+      let value, done;
+      try { ({value, done} = await this.reader.read()); }
+      catch (e) { this.done = true; return false; }
+      if (done) { this.done = true; return false; }
+      const merged = new Uint8Array(this.buf.byteLength + value.byteLength);
+      merged.set(this.buf, 0);
+      merged.set(value, this.buf.byteLength);
+      this.buf = merged;
+    }
+    return true;
+  }
+  async next() {
+    if (!await this._fill(4)) return null;
+    const t = this.buf[0];
+    const len = (this.buf[1] << 16) | (this.buf[2] << 8) | this.buf[3];
+    const total = 4 + this.headerExtra + len;
+    if (!await this._fill(total)) return null;
+    const extra = this.headerExtra ? this.buf.subarray(4, 4 + this.headerExtra) : null;
+    const payload = this.buf.subarray(4 + this.headerExtra, total);
+    const result = { type: t, extra: extra && new Uint8Array(extra), payload: new Uint8Array(payload) };
+    this.buf = this.buf.subarray(total);
+    return result;
+  }
+}
+
+// Mirrors wire.PeekStreamHeader. Reads bytes from `reader` until it
+// can decide whether the stream begins with a TypeStreamHeader (0x23)
+// frame. If yes, consumes it and returns {trackName, leftover}. If no,
+// returns trackName="" and `leftover` containing the bytes already
+// pulled — caller must seed the FramedReader with this leftover so
+// the first feed-frame byte isn't lost.
+async function peekStreamHeader(reader) {
+  let buf = new Uint8Array(0);
+  const pull = async (min) => {
+    while (buf.byteLength < min) {
+      const r = await reader.read();
+      if (r.done) return false;
+      const merged = new Uint8Array(buf.byteLength + r.value.byteLength);
+      merged.set(buf, 0);
+      merged.set(r.value, buf.byteLength);
+      buf = merged;
+    }
+    return true;
+  };
+  if (!await pull(1)) return { trackName: "", leftover: buf };
+  if (buf[0] !== T_STREAM_HEADER) return { trackName: "", leftover: buf };
+  if (!await pull(4)) throw new Error("eof in stream header length");
+  const len = (buf[1] << 16) | (buf[2] << 8) | buf[3];
+  const total = 4 + len;
+  if (!await pull(total)) throw new Error("eof in stream header name");
+  const trackName = new TextDecoder().decode(buf.subarray(4, total));
+  return { trackName, leftover: buf.subarray(total) };
+}
+
+function b64urlToBytes(s) {
+  let b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+  while (b64.length % 4) b64 += "=";
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8;
+}
+
+async function main() {
+  try {
+    console.log("quicrtc receiver: connecting to " + url);
+    const wtOpts = hash ? { serverCertificateHashes: [{algorithm: "sha-256", value: b64urlToBytes(hash)}] } : {};
+    const wt = new WebTransport(url, wtOpts);
+    await wt.ready;
+    console.log("quicrtc receiver: WebTransport ready");
+    status.textContent = "connected";
+
+    const ctl = await wt.createBidirectionalStream();
+    const writer = ctl.writable.getWriter();
+    const reader = new FramedReader(ctl.readable.getReader());
+    console.log("quicrtc receiver: ctl stream open");
+
+    // HELLO
+    await writer.write(encodeControlFrame(T_HELLO, new TextEncoder().encode(
+      JSON.stringify({role: "recv", slug, ver: "1"})
+    )));
+    console.log("quicrtc receiver: HELLO sent");
+
+    // Wait for SDP
+    while (true) {
+      const f = await reader.next();
+      if (!f) throw new Error("ctl closed before SDP");
+      console.log("quicrtc receiver: got frame type=" + f.type);
+      if (f.type === T_SDP) break;
+    }
+    console.log("quicrtc receiver: SDP received, awaiting feed-stream data");
+    status.textContent = "receiving";
+
+    // The publisher sends AccessUnits via the AU pipeline → uni
+    // streams with TypeKeyframe/TypePFrame/TypeFrame. Receive each
+    // uni stream's frames; treat each frame as one "message."
+    const recvTimes = [];
+    const sentTimes = [];
+
+    const uniReader = wt.incomingUnidirectionalStreams.getReader();
+
+    // One uni stream per group (publisher resets stream on next
+    // keyframe). We process them serially; each carries one or
+    // more frames. For the chat workload at 200msg/sec each Send
+    // is treated as a keyframe → fresh uni stream → 1 frame per
+    // stream.
+    while (recvTimes.length < expect) {
+      const r = await uniReader.read();
+      if (r.done) break;
+      const stream = r.value;
+      const sr = stream.getReader();
+      // Server prefixes a TypeStreamHeader (0x23) frame on every uni
+      // stream when the publisher set a track name. Consume it so the
+      // FramedReader starts at the first feed frame.
+      const { leftover } = await peekStreamHeader(sr);
+      const fr = new FramedReader(sr, 13, leftover);
+      while (recvTimes.length < expect) {
+        const f = await fr.next();
+        if (!f) break;
+        if (f.type !== T_KEYFRAME && f.type !== T_PFRAME && f.type !== T_FRAME) continue;
+        const now = performance.now();
+        // PTS lives in the 13-byte feed-frame extra header
+        // (8B PTS + 4B seq + 1B flags). We use the PTS field as
+        // our "sent timestamp" carrier (BigEndian uint64 ns).
+        const dv = new DataView(f.extra.buffer, f.extra.byteOffset, 13);
+        const sentNs = Number(dv.getBigUint64(0, false));
+        sentTimes.push(sentNs);
+        recvTimes.push(now);
+      }
+    }
+
+    // Compute per-message latency. Note: server-sent timestamp is
+    // wall-clock nanoseconds; receiver-side performance.now() is
+    // monotonic ms relative to the page. We compute deltas
+    // *relative* to the first message rather than absolute, since
+    // clocks aren't synced. We post both raw vectors.
+    status.textContent = `done (${recvTimes.length}/${expect})`;
+    await fetch(reportURL, {
+      method: "POST",
+      headers: {"content-type": "application/json"},
+      body: JSON.stringify({
+        protocol: "quicrtc",
+        n: recvTimes.length,
+        recvAtMs: recvTimes,       // relative to page load
+        sentAtNs: sentTimes,       // server wall clock
+        firstRecvMs: recvTimes[0],
+        lastRecvMs: recvTimes[recvTimes.length - 1],
+      }),
+    });
+  } catch (e) {
+    status.textContent = "error: " + e.message;
+    await fetch(reportURL, {
+      method: "POST",
+      headers: {"content-type": "application/json"},
+      body: JSON.stringify({protocol: "quicrtc", error: e.message || String(e)}),
+    });
+  }
+}
+main();
+</script>
+</body>
+</html>

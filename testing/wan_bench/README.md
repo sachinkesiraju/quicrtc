@@ -8,6 +8,11 @@ VM and `-mode=client` on the other. Tests:
 - **multi** — concurrent burst (50KB × 30fps) + tokens (200/s × 64B), measure token tail
 - **resume** — quicrtc resume vs WebRTC full reconnect
 - **scale** — ramp to N parallel sessions, measure success rate + setup degradation
+- **computer_use** — closed-loop action→DOM RTT, quicrtc (4 tracks via
+  `AddTrackSpec`) vs a TCP-mux baseline (single TLS connection, 1-byte
+  stream-id, length-prefix frames). Both arms run back-to-back over the
+  same real WAN path. Per-action samples written to
+  `wan_results/computer_use.csv`.
 
 ## Multi-Region Testing
 
@@ -102,7 +107,86 @@ wan_results/
 ./wan_bench-linux-amd64 -mode=client -server=<server-ip> -test=multi -runs=5 -csv=multi.csv
 ./wan_bench-linux-amd64 -mode=client -server=<server-ip> -test=resume -n=20 -csv=resume.csv
 ./wan_bench-linux-amd64 -mode=client -server=<server-ip> -test=scale -total=200 -batch=25 -interval=1s -csv=scale.csv
+
+# computer_use: closed-loop action→DOM RTT, quicrtc vs TCP-mux baseline
+./wan_bench-linux-amd64 -mode=client -server=<server-ip> -mode-name=computer_use \
+    -screen-mbps=12 -trials=3 -trial-sec=12
+# writes wan_results/computer_use.csv
 ```
+
+## computer_use mode
+
+Why it exists: the synthetic-proxy sweep at
+`testing/benchmarks/agent/computer_use_sweep_test.go` suggests quicrtc
+may lose to a TCP-mux baseline at synthetic ~50 ms RTT + 1-5 % loss.
+We don't yet know whether that holds under REAL WAN conditions because
+the synthetic proxy doesn't model TCP cwnd halving, slow-start, or RTO.
+This mode runs both arms back-to-back over the same real WAN path
+between the two VMs created by `gcp_setup.sh`, so the per-trial
+RTT/loss/jitter state is comparable.
+
+### Wire layout
+
+| Arm | Transport | screen | actions (client→server) | dom_events (server→client) | telemetry |
+| --- | --- | --- | --- | --- | --- |
+| quicrtc | one quicrtc session, 4 tracks | `AddTrackSpec(KindVideo)` | client `Publish(KindToolCalls)` | `AddTrackSpec(KindTokens)` | `AddTrackSpec(KindTelemetry)` |
+| baseline | one TLS connection over TCP | length-prefix frame, sid=0 | sid=1 | sid=2 | sid=3 |
+
+Both arms see the same payload sizes (screen=`-screen-mbps` Mbps / 30
+fps; actions=64 B at 100/s; dom_events=256 B echoed once per action;
+telemetry=64 B at 200/s) and the same duration (`-trial-sec`, default
+12 s).
+
+### Flags
+
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `-mode-name=computer_use` | — | selects this mode (alias for `-test`) |
+| `-screen-mbps` | `12` | per-frame size derived from this; try `60` for stress |
+| `-trials` | `3` | trials per arm |
+| `-trial-sec` | `12` | seconds per trial |
+| `-loss-pct` | `0` | server-side: if >0, applies `tc qdisc add dev <iface> root netem loss <pct>%` on Linux. Removed on SIGTERM. No-op + WARN on non-Linux or when `tc` is missing. **Headline runs should set this to 0** — the WAN itself is the network condition. |
+| `-loss-iface` | `eth0` | server-side iface for `-loss-pct` (use `ens4` etc. on some GCP images) |
+| `-tcp-baseline-addr` | `:4435` | TCP-mux baseline TLS listen addr (server) / dial addr (client, when /info doesn't carry it) |
+
+### Output
+
+`wan_results/computer_use.csv` columns:
+
+```
+protocol,trial,action_index,rtt_ms,err
+```
+
+One row per action, both arms, all trials. The headline emitted to
+stdout at end of run looks like:
+
+```
+=== Computer-use over real WAN, RTT≈<measured> start / <measured> end, loss=<label> ===
+quicrtc:  trials=N actions=N  p50=X p99=Y mean=Z
+baseline: trials=N actions=N  p50=A p99=B mean=C
+ratio (baseline/quicrtc): p50 = R1x, p99 = R2x
+```
+
+### Firewall
+
+The TCP-mux baseline binds `:4435/tcp` on the server VM. If you
+deviate from the canned `gcp_setup.sh` rule, make sure `:4435/tcp`
+ingress is allowed alongside the existing `:4433/udp`, `:4434/udp`,
+`:8080/tcp`, `:8090/tcp`.
+
+### Caveats
+
+- `-loss-pct` requires root on the bench VM to invoke `tc`. The GCP
+  free-tier images may need `sudo apt-get install -y iproute2` first
+  (the package ships `tc`). If `tc` is missing, the flag is a logged
+  no-op and the bench runs with WAN-only loss — which is the honest
+  headline anyway.
+- The bench is "one-at-a-time" per arm: the server's OnSession gate
+  serialises trial pumps on a session mutex so two concurrent
+  computer_use clients don't share screen frames. Other test modes
+  (setup/multi/resume/scale) are unaffected — they don't announce
+  the `cu_actions` track, so the OnSession gate times out fast and
+  the pumps never start for them.
 
 ## What gets measured
 

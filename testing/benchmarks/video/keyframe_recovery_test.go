@@ -218,7 +218,7 @@ func TestKeyframeRecoveryComparison(t *testing.T) {
 	const (
 		fps     = 30
 		gopSecs = 2.0
-		trials  = 5
+		trials  = 100 // bumped from 5: methodology floor is ≥100 for p99 claims
 	)
 
 	baseline := measureRecovery(t, fps, gopSecs, trials, false)

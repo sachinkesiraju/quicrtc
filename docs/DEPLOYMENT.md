@@ -112,7 +112,7 @@ Mount the secret and use `cert.Bundle`:
 ```go
 certBytes, _ := os.ReadFile("/path/to/tls.crt")
 keyBytes, _ := os.ReadFile("/path/to/tls.key")
-tlsCert, _ := tls.LoadX509KeyPair(certBytes, keyBytes)
+tlsCert, _ := tls.X509KeyPair(certBytes, keyBytes)
 srv, _ := server.New(server.Config{
     Addr:       ":443",
     CertBundle: &cert.Bundle{TLS: tlsCert},
@@ -132,47 +132,58 @@ The `cert.Reloader` automatically picks up certificate changes without restart. 
 
 ## Rate Limiting and DoS Protection
 
-### Per-IP Rate Limiting
+quicrtc exposes two integration points; per-IP throttling belongs upstream at the load balancer.
 
-Implement rate limiting at the connection establishment layer:
+### Per-session bandwidth — `Config.InboundRateLimit`
 
-```go
-import "golang.org/x/time/rate"
-
-var ipLimiter = sync.Map{} // map[string]*rate.Limiter
-
-func getLimiter(ip string) *rate.Limiter {
-    limiter, _ := ipLimiter.LoadOrStore(ip, rate.NewLimiter(10, 5))
-    return limiter.(*rate.Limiter)
-}
-
-// In your connection handler:
-if !getLimiter(clientIP).Allow() {
-    // Reject connection
-}
-```
-
-### Per-Slug Session Limits
-
-Limit concurrent sessions per authentication slug:
+Bounds inbound (PublishBack) traffic per session via a token bucket. Set this in production.
 
 ```go
-type SessionLimiter struct {
-    maxSessions int
-    counts      map[string]int
-    mu          sync.Mutex
-}
-
-func (l *SessionLimiter) Allow(slug string) bool {
-    l.mu.Lock()
-    defer l.mu.Unlock()
-    if l.counts[slug] >= l.maxSessions {
-        return false
-    }
-    l.counts[slug]++
-    return true
-}
+srv, _ := server.New(server.Config{
+    Addr: ":4433",
+    InboundRateLimit: session.RateLimit{
+        MaxAUsPerSecond:   200,
+        MaxBytesPerSecond: 5 << 20, // 5 MiB/s
+    },
+    // ... other fields
+})
 ```
+
+### Per-tenant admission cap — `Config.AuthValidator` + `Config.OnSession`
+
+Validator runs per HELLO and can refuse before any data flows. Pair it with `OnSession` to decrement on disconnect via `SessionHandle.Context().Done()`:
+
+```go
+var inFlight sync.Map // tenant -> *atomic.Int64
+const maxPerTenant = 100
+
+srv, _ := server.New(server.Config{
+    AuthValidator: func(credential string) (string, error) {
+        claims, err := jwt.ParseAndVerify(credential, jwks)
+        if err != nil {
+            return "", err
+        }
+        v, _ := inFlight.LoadOrStore(claims.TenantID, new(atomic.Int64))
+        if v.(*atomic.Int64).Add(1) > maxPerTenant {
+            v.(*atomic.Int64).Add(-1)
+            return "", errors.New("tenant limit reached")
+        }
+        return claims.TenantID, nil
+    },
+    OnSession: func(h server.SessionHandle) {
+        go func() {
+            <-h.Context().Done()
+            if v, ok := inFlight.Load(/* tenant */); ok {
+                v.(*atomic.Int64).Add(-1)
+            }
+        }()
+    },
+})
+```
+
+### Per-IP throttling — at the LB
+
+quicrtc has no per-IP hook by design. Do this at your UDP load balancer (nginx stream, HAProxy, or a `net.PacketConn` wrapper).
 
 ### QUIC-Specific Protections
 
@@ -181,15 +192,7 @@ quic-go provides built-in protections:
 - Stream limits per connection
 - Handshake timeout
 
-Configure these in your QUIC config:
-
-```go
-quicConfig := &quic.Config{
-    MaxIdleTimeout:        30 * time.Second,
-    MaxIncomingStreams:   1000,
-    MaxIncomingUniStreams: 1000,
-}
-```
+quicrtc currently ships with tuned defaults (receive windows 4/16 MiB per-stream, 8/32 MiB per-connection, datagrams enabled, partial-delivery on reset) and does not expose `quic.Config` for caller-side tuning. If you need to override `MaxIdleTimeout`, `KeepAlivePeriod`, or stream caps — for example for mobile sessions where the radio sleeps — file an issue and we'll add the hook.
 
 ## Monitoring and Observability
 
@@ -210,14 +213,45 @@ Monitor these metrics to understand system health:
 
 ### Prometheus Integration
 
-Use the built-in metrics:
+Implement the `metrics.Metrics` interface (13 methods — see `metrics/metrics.go`) as a Prometheus adapter:
 
 ```go
-import "github.com/prometheus/client_golang/prometheus"
+type promMetrics struct {
+    sessions   prometheus.Counter
+    auSent     *prometheus.CounterVec
+    auDropped  *prometheus.CounterVec
+    handshake  prometheus.Histogram
+    authFailed *prometheus.CounterVec
+    // ... add the rest of the 13
+}
 
-registry := prometheus.NewRegistry()
-// Register quicrtc metrics (if exposed)
+func newPromMetrics(reg prometheus.Registerer) *promMetrics {
+    m := &promMetrics{
+        sessions: prometheus.NewCounter(prometheus.CounterOpts{Name: "quicrtc_sessions_started_total"}),
+        auSent:   prometheus.NewCounterVec(prometheus.CounterOpts{Name: "quicrtc_au_sent_total"}, []string{"kind"}),
+        auDropped: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "quicrtc_au_dropped_total"}, []string{"kind", "reason"}),
+        handshake: prometheus.NewHistogram(prometheus.HistogramOpts{Name: "quicrtc_handshake_duration_seconds"}),
+        authFailed: prometheus.NewCounterVec(prometheus.CounterOpts{Name: "quicrtc_auth_failed_total"}, []string{"reason"}),
+    }
+    reg.MustRegister(m.sessions, m.auSent, m.auDropped, m.handshake, m.authFailed)
+    return m
+}
+
+func (m *promMetrics) SessionStarted()                        { m.sessions.Inc() }
+func (m *promMetrics) AUSent(kind string, _ int)              { m.auSent.WithLabelValues(kind).Inc() }
+func (m *promMetrics) AUDropped(kind, reason string)          { m.auDropped.WithLabelValues(kind, reason).Inc() }
+func (m *promMetrics) HandshakeDuration(d time.Duration)      { m.handshake.Observe(d.Seconds()) }
+func (m *promMetrics) AuthFailed(reason string)               { m.authFailed.WithLabelValues(reason).Inc() }
+// ... implement the remaining methods similarly
+
+// Wire it in:
+srv, _ := server.New(server.Config{
+    Metrics: newPromMetrics(prometheus.DefaultRegisterer),
+    // ...
+})
 ```
+
+quicrtc deliberately does not depend on `prometheus/client_golang` — keep the adapter in your application.
 
 ### Logging Best Practices
 
@@ -282,20 +316,22 @@ AuthValidator: func(credential string) (tenant string, err error) {
 
 ### Graceful Shutdown
 
-Implement graceful shutdown to complete in-flight sessions:
+`Server.Shutdown(ctx)` flips draining mode (the `/wt` upgrade handler returns 503 + `Retry-After: 5` to new clients), sends CLOSE to live sessions, and polls until they terminate or `ctx` expires.
 
 ```go
 srv, _ := server.New(config)
-go srv.ListenAndServe(ctx)
+errCh := make(chan error, 1)
+go func() { errCh <- srv.ListenAndServe(ctx) }()
 
-// On shutdown signal:
-shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
-defer shutdownCancel()
-
-// Stop accepting new connections
-// Send CLOSE frames to existing sessions
-// Wait for sessions to terminate or timeout
+<-shutdownSignal // SIGTERM, etc.
+drainCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+defer cancel()
+if err := srv.Shutdown(drainCtx); err != nil {
+    log.Printf("drain timed out: %v", err)
+}
 ```
+
+For readiness probes, poll `srv.IsDraining()` — return non-200 while draining so the LB stops routing new connections to this instance.
 
 ### Health Checks
 
@@ -309,13 +345,24 @@ http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 })
 ```
 
-### Database Backing (Optional)
+### Multi-Instance Session Resume — `SessionStore`
 
-For session resume across server restarts, consider:
+`server.SessionStore` is the interface that holds parked session state across socket disconnects:
 
-1. **Redis**: Store session state for fast resume
-2. **PostgreSQL**: For durable session storage
-3. **Etcd**: For distributed configuration
+```go
+type SessionStore interface {
+    AllocateID() string
+    Park(tenant, sessionID string, receivers map[string]*pubsub.Receiver, onEvict func())
+    Resume(tenant, sessionID string) map[string]*pubsub.Receiver
+}
+```
+
+**Important caveat.** A parked session holds in-process `*pubsub.Receiver` channels into broadcasters. These cannot be serialized across processes. So a "shared" backend can hold session metadata (which instance owns the session, expiresAt) — but the actual replay path requires:
+
+1. **Sticky LB routing** (recommended): reconnect goes back to the same instance that holds the receivers. Use the HELLO/SDP `SessionID` as the affinity key. Pair sticky routing with the default `NewMemorySessionStore()`.
+2. **Active session migration** (future): ship replay buffers + reattach to the broadcaster on the new instance. Not implemented today.
+
+A shared store is useful for telling the LB which instance to route to; it does not let any instance serve any session.
 
 ## Deployment Patterns
 
@@ -410,15 +457,7 @@ See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for common production issues and 
 
 ### QUIC Configuration
 
-Tune QUIC parameters for your workload:
-
-```go
-quicConfig := &quic.Config{
-    MaxIdleTimeout:        60 * time.Second,  // Longer for mobile
-    MaxIncomingStreams:   100,               // Limit per connection
-    KeepAlivePeriod:       10 * time.Second,
-}
-```
+QUIC parameters are not currently tunable; quicrtc ships with defaults chosen for multi-modal AI workloads (receive windows 4/16 MiB per-stream, 8/32 MiB per-connection, datagrams enabled). If your workload needs `MaxIdleTimeout` / `KeepAlivePeriod` / stream-cap overrides — most common for long-lived mobile sessions — file an issue.
 
 ### GOMAXPROCS
 

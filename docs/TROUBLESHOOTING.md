@@ -152,8 +152,8 @@ This guide covers common issues, debugging techniques, and solutions for quicrtc
 **Solutions:**
 
 1. **Check Safari version**
-   - Requires Safari 18+ for experimental support
-   - Enable WebTransport in Develop menu
+   - Requires Safari 18.2+ (GA December 2024; no flag needed)
+   - Older 17.x builds need the WebTransport flag in Develop → Experimental Features
 
 2. **Certificate issues**
    - Safari has stricter certificate validation
@@ -268,23 +268,17 @@ This guide covers common issues, debugging techniques, and solutions for quicrtc
 
 ## Debugging Techniques
 
-### Enable Debug Logging
+### Enable QUIC debug logging (qlog)
 
-```go
-import "log"
+quic-go writes per-connection [qlog](https://github.com/quicwg/qlog) files when the `QLOGDIR` environment variable is set. No code change required.
 
-srv, _ := server.New(server.Config{
-    // ... other config
-})
-
-// Enable QUIC debug logging
-quicConfig := &quic.Config{
-    // ... other config
-}
-quicConfig.Tracer = quic.NewTracer(func(_ quic.Connection, b []byte) {
-    log.Printf("QUIC: %x", b)
-})
+```bash
+QLOGDIR=/tmp/qlogs ./your-quicrtc-server
 ```
+
+Each connection produces one `.qlog` file. Open with [qvis.edm.uhasselt.be](https://qvis.edm.uhasselt.be/) for a timeline view, or [qlog-tools](https://github.com/quic-tracker/qlog-tools) for grep-friendly text.
+
+For application-level logging, pass a `*slog.Logger` via `server.Config.Logger` — server events (session start/end, auth failures, track lifecycle) go through it.
 
 ### Use pprof for Profiling
 
@@ -324,16 +318,23 @@ wireshark quic.pcap
 ### Client-Side Debugging
 
 ```javascript
-// Enable detailed logging
-const client = new QuicRTCClient();
-client.on('debug', (msg) => {
-    console.log('[quicrtc debug]', msg);
-});
+const client = new QuicRTCClient(/* options */);
 
-// Monitor connection state
-client.on('stateChange', (state) => {
+// Connection state transitions
+client.onStateChange((state) => {
     console.log('[quicrtc state]', state);
 });
+
+// Server-signaled per-track backpressure (subscriber slow-consumer hints)
+client.onBackpressure((track, level) => {
+    console.log('[quicrtc backpressure]', track, level);
+});
+
+// Periodic introspection: poll getStats() at whatever cadence you want
+setInterval(() => {
+    const stats = client.getStats();
+    console.log('[quicrtc stats]', stats); // auSent, sessionId, connectionState, trackCount, remoteTrackCount
+}, 5000);
 ```
 
 ## Common Error Messages

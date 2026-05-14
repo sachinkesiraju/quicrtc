@@ -190,6 +190,6 @@ breaking API changes; patch versions don't.
 
 v1 is the stable target. Receivers silently ignore unknown control
 frame types, so v1.x additions are forward-compatible. See
-[`spec.md`](spec.md).
+[`SPEC.MD`](SPEC.MD).
 
 [0.1.0]: https://github.com/sachinkesiraju/quicrtc/releases/tag/v0.1.0

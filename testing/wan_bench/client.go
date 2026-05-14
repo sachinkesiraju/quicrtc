@@ -32,6 +32,10 @@ type serverInfo struct {
 	WebtransportURL         string `json:"webtransportURL"`
 	WebtransportCertHashB64 string `json:"webtransportCertHashB64"`
 	WebrtcSignaling         string `json:"webrtcSignaling"`
+	// TCPBaselineAddr is the host:port of the TCP-mux baseline TLS
+	// listener for the computer_use mode. Empty when the server build
+	// pre-dates the computer_use addition.
+	TCPBaselineAddr string `json:"tcpBaselineAddr"`
 }
 
 func fetchInfo(serverHost string) (*serverInfo, error) {

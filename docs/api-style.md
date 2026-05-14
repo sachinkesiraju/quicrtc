@@ -17,8 +17,9 @@ srv, _ := server.New(server.Config{
     SDP:  wire.SDP{Codec: "avc1.42E01F", Width: 1280, Height: 720, FPS: 30},
 })
 
-// Legacy method - no Kind specified
-pub := srv.AddTrack("screen", track.KindVideo, 4)
+// Legacy method — Kind defaulted silently to track.KindVideo (footgun
+// for non-video tracks; the motivation for AddTrackSpec).
+pub := srv.AddTrack("screen")
 ```
 
 ### New Pattern
@@ -64,10 +65,10 @@ func main() {
         SDP:  wire.SDP{Codec: "avc1.42E01F", Width: 1280, Height: 720, FPS: 30},
     })
 
-    // Legacy methods
-    videoPub := srv.AddTrack("screen", track.KindVideo, 4)
-    tokenPub := srv.AddTrack("reasoning", track.KindTokens, 2)
-    telePub := srv.AddTrackWithTrackID("telemetry", track.KindTelemetry, 7, 0x42)
+    // Legacy methods — all defaulted Kind to KindVideo silently.
+    videoPub := srv.AddTrack("screen")                            // KindVideo
+    tokenPub := srv.AddTrack("reasoning")                          // ALSO KindVideo — wrong delivery class for tokens
+    telePub  := srv.AddTrackWithTrackID("telemetry", 7, 0x42)     // ALSO KindVideo — wrong delivery class for telemetry
 
     go srv.ListenAndServe(ctx)
 
@@ -247,19 +248,12 @@ After migration, monitor:
 
 If you encounter issues after migration:
 
-1. **Revert to legacy APIs**
+1. **Revert to legacy APIs** (Kind silently defaults to `KindVideo`)
    ```go
-   // Rollback to legacy
-   pub := srv.AddTrack("screen", track.KindVideo, 4)
+   pub := srv.AddTrack("screen")
    ```
 
-2. **Check delivery class**
-   ```go
-   // Verify the delivery class being used
-   fmt.Printf("Delivery class: %v\n", pub.DeliveryClass())
-   ```
-
-3. **Report issues**
+2. **Report issues**
    - File a GitHub issue with details
    - Include before/after performance metrics
    - Include minimal reproduction code

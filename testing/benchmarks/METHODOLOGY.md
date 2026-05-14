@@ -48,6 +48,10 @@ Required so the suite runs on macOS / Windows / cloud CI without root.
 - `loadgen.ComputeStats` reports n, min, mean, p50, p95, p99, max.
 - Sample sizes: ≥100 per condition for stable p99 estimates, kept
   under ~5s wall-clock per test so the full suite fits in 1-2 minutes.
+  - Current state (some tests below the floor; tracked for re-runs):
+    resume n=30, keyframe-recovery trials=5, multimodal n=400,
+    fanout broadcast frames=60. Tests below n=100 should not be cited
+    for p99 — treat them as max-of-N only.
 - Resume benchmark adds bootstrap CIs on the mean (1000 resamples) so
   setup-latency claims are accompanied by uncertainty bounds.
 
@@ -106,3 +110,49 @@ non-benchmark tests for the library; see
    real WAN would scale absolutes while preserving ratios.
 4. **Single WebRTC implementation (pion).** libwebrtc comparison is
    out of scope.
+5. **Pion baselines use host candidates only.** Every benchmark passes
+   `webrtc.Configuration{ICEServers: []webrtc.ICEServer{}}`. Real-world
+   cold-starts add 20-100 ms of STUN gathering. Cold-start ratios are
+   accurate against the no-STUN baseline; do not extrapolate to
+   "production WebRTC setup cost" without re-baselining.
+6. **HTTP/2-multiplexed steelman for Row 3 — done.** The original
+   serial-dispatch baseline showed 20×; the steelman (HTTP/2 mux, 8
+   concurrent streams sharing one TCP+TLS connection, per-stream flow
+   control) shows HTTP/2 ~7 ms median vs quicrtc `BidiPerCall` ~13 ms
+   on lossless loopback. Near-parity, HTTP/2 slightly ahead. The
+   structural QUIC win (no TCP head-of-line blocking under loss)
+   shows up in the WAN row, not here. See
+   [`feed/bidi_http2_bench_test.go`](../../feed/bidi_http2_bench_test.go).
+7. **PLI-aware steelman for Row 4 — done.** A pion publisher +
+   subscriber pair with the subscriber sending RTCP
+   `PictureLossIndication` recovers in ~33 ms mean / ~35 ms p99 —
+   identical to quicrtc's `Client.RequestKeyframe()` on lossless
+   loopback. Both arms bottleneck on the 30 fps frame interval
+   (33.3 ms). The original 62× ratio was against a no-signaling-at-all
+   WebRTC subscriber. quicrtc's advantage (in-band, doesn't depend on
+   RTCP packets surviving loss) shows up under RTCP feedback loss or
+   in fan-out scenarios — not in clean loopback benchmarks. See
+   [`video/keyframe_recovery_pion_test.go`](video/keyframe_recovery_pion_test.go).
+8. **Wi-Fi → cellular row measures warm-session reattach, not path
+   migration.** Same loopback IP throughout; no CID change, no
+   PATH_CHALLENGE, no NAT rebind. Re-label as "Warm reattach" until a
+   real migration test lands.
+9. **Computer-use baselines explored before Row 5.** Two synthetic-
+   proxy baselines were tested and discarded: TCP-mux (quicrtc behind
+   across 4 configs; proxy understates real TCP pain) and pion-DCs-
+   for-everything (quicrtc 300×+ ahead but unrealistic — production
+   WebRTC uses RTP for video, not SCTP DCs). Only the real-WAN vs
+   TCP-mux run shipped — see
+   [`testing/wan_bench/computer_use.go`](../wan_bench/computer_use.go).
+
+## Version pinning
+
+Numbers in the README's performance table were measured against:
+
+- pion/webrtc/v4 — see `go.sum` for the exact patch version
+- quic-go v0.59.0
+- Go 1.26.x
+- macOS (Darwin 25.x) on Apple Silicon, single-host loopback
+- `GOMAXPROCS=` runtime.NumCPU (unmodified)
+
+Absolute numbers will drift across hardware and library versions; structural ratios should not. Run `go test -v -p 1 ./testing/benchmarks/...` on your hardware to validate locally.

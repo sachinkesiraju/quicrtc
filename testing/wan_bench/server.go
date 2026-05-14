@@ -51,6 +51,20 @@ func runServer(ctx context.Context, externalHost string, ivfPath string) error {
 		return fmt.Errorf("cert: %w", err)
 	}
 
+	// computer_use mode hook (additive): the existing modes' surface
+	// is unchanged, but we additionally register 4 cu_* tracks on the
+	// quicrtc server and stand up a TCP-mux baseline listener. The
+	// OnSession hook is gated by the cu_actions track announce, so
+	// other test modes (setup/multi/resume/scale) never trigger any
+	// computer-use pumping. cuState is bound below after qsrv.New
+	// (installComputerUseTracks needs the *Server); the closure reads
+	// it lazily so the chicken-and-egg between Config.OnSession and
+	// qserver.New is resolved without modifying the existing
+	// AddTrack(...) calls.
+	var cuState *computerUseServerState
+	cuOnSession := makeComputerUseOnSession(func() *computerUseServerState { return cuState },
+		*flagScreenMbps, *flagTrialSec)
+
 	// 1. quicrtc native server on :4433
 	qsrv, err := qserver.New(qserver.Config{
 		Addr:         "0.0.0.0:4433",
@@ -58,6 +72,7 @@ func runServer(ctx context.Context, externalHost string, ivfPath string) error {
 		CertBundle:   bundle,
 		MaxSessions:  10000,
 		SDP:          wire.SDP{Codec: "vp8", Width: 1280, Height: 720, FPS: 30},
+		OnSession:    cuOnSession,
 		OnDataChannel: func(dc *datachannel.Channel) {
 			// Push a "hello" + a stream of timestamped tokens for the
 			// multi-modal test. Client consumes via DataChannel.Recv.
@@ -107,6 +122,16 @@ func runServer(ctx context.Context, externalHost string, ivfPath string) error {
 		}
 	}()
 
+	// 1b. computer_use additions (additive): register the 4 cu_* tracks
+	// on qsrv and stand up the TCP-mux baseline TLS listener. Both
+	// listeners run for the lifetime of ctx; both are silent until a
+	// client actually connects to them, so this is a no-op cost for
+	// the existing setup/multi/resume/scale modes.
+	cuState = installComputerUseTracks(qsrv)
+	if err := startTCPBaselineServer(ctx, *flagTCPBaseAddr, bundle, *flagScreenMbps, *flagTrialSec); err != nil {
+		return fmt.Errorf("computer_use tcp baseline: %w", err)
+	}
+
 	// 2. Raw WebTransport on :4434
 	if err := startRawWT(ctx, externalHost, bundle); err != nil {
 		return fmt.Errorf("raw wt: %w", err)
@@ -128,6 +153,7 @@ func runServer(ctx context.Context, externalHost string, ivfPath string) error {
 			"webtransportURL":   fmt.Sprintf("https://%s:4434/wt", externalHost),
 			"webtransportCertHashB64": qsrv.CertHashB64(),
 			"webrtcSignaling":   fmt.Sprintf("http://%s:8080/sig", externalHost),
+			"tcpBaselineAddr":   fmt.Sprintf("%s%s", externalHost, *flagTCPBaseAddr),
 		})
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

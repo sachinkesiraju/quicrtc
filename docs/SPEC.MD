@@ -66,7 +66,7 @@ Each frame:
 ```
 
 All multi-byte fields big-endian. Maximum payload per feed frame:
-16 MiB (constrained by the 3-byte length encoding).
+16,777,215 bytes (16 MiB − 1, the 3-byte length-field cap). Enforced by `wire.MaxFeedPayload`.
 
 The first frame on a feed stream MUST be a keyframe. Subsequent
 frames within that GOP are P-frames in decode order. When the next

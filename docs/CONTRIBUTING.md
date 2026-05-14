@@ -29,13 +29,15 @@ npm test
 npm run bench       # smoke-test the wire benchmarks
 ```
 
-End-to-end real-QUIC benchmarks live in `benchmarks/`:
+End-to-end real-QUIC benchmarks live in `testing/benchmarks/`:
 
 ```bash
-go test -v -p 1 ./benchmarks/... -timeout=600s
+go test -v -p 1 ./testing/benchmarks/... -timeout=600s
 ```
 
 `-p 1` keeps the heavy benchmark subpackages from competing for CPU.
+
+**Bench placement.** Bench tests that need in-package access to unexported internals (e.g., the pump dispatch primitives `runStreamGOP` / `runBidiPerCall` in `feed/`) live alongside their package as `<pkg>/*_bench_test.go`. Integration and end-to-end benches that only use public APIs go under `testing/benchmarks/<topic>/`. The `testing/wan_bench/` subpackage is a standalone `main` for cross-region runs.
 
 CI runs all of the above on every PR (see
 [`.github/workflows/test.yml`](../.github/workflows/test.yml)).
@@ -69,6 +71,7 @@ CI runs all of the above on every PR (see
    CHANGELOG entry.
 4. **Wire format additions** include a corresponding TypeScript
    wire-test case so the JS side stays in sync.
+5. **Public API changes** include updated doc comments, a CHANGELOG entry, and — for deprecations — a note in [`api-style.md`](api-style.md).
 
 ## Wire format guarantees
 

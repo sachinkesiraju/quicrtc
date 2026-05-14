@@ -9,9 +9,9 @@
 **Real-time transport for AI agent sessions over QUIC/WebTransport.**
 
 quicrtc is a Go library and TypeScript SDK designed for the traffic
-shape that modern AI agents produce. It streams video, low-latency
-tokens, RPC-shaped tool calls, and fire-and-forget telemetry over a
-single QUIC/WebTransport connection.
+shape that modern AI agents produce. It streams video,
+low-latency tokens, RPC-shaped tool calls, and fire-and-forget
+telemetry over a single QUIC/WebTransport connection.
 
 Most agent products today glue together separate transports — SSE for LLM tokens, WebRTC for video, gRPC for tool calls, OTLP for telemetry — each with its own connection lifecycle, reconnect story, and head-of-line (HOL) behavior. quicrtc folds that stack into a single QUIC connection, and each kind of traffic gets routed the way it needs: video recovers in one frame instead of waiting two seconds, tokens stream without getting stuck behind a video burst, tool calls run concurrently without blocking each other, and telemetry bypasses the queue entirely.
 
@@ -30,6 +30,7 @@ data to a client at once.
 - [Features](#features)
 - [Performance](#performance)
 - [Prerequisites](#prerequisites)
+- [Install](#install)
 - [Quick start](#quick-start)
 - [Authentication](#authentication)
 - [Library packages](#library-packages)
@@ -63,26 +64,23 @@ data to a client at once.
 
 Real numbers from the benchmark suite in the repo, run on Apple Silicon loopback. Each row's baseline is the current incumbent practice for that workload. WAN workload run on two GCP VMs (~50 ms RTT) via [`testing/wan_bench`](testing/wan_bench/). To reproduce: `go test -v -p 1 -run TestName ./testing/benchmarks/...`.
 
-| Workload | Baseline | quicrtc |
-|---|---|---|
-| [Cold-start setup (vs. WebRTC)](testing/benchmarks/resume/resume_bench_test.go) | Full PeerConnection + ICE candidate gathering + DTLS — mean **138 ms** | TLS 1.3 + HELLO in a QUIC 1-RTT handshake — mean **0.94 ms** — **147×** by skipping ICE/DTLS entirely |
-| [Tokens during video burst (vs. WebRTC)](testing/benchmarks/multimodal/multistream_isolation_test.go) | pion: 2 `RTCDataChannel`s sharing one SCTP-over-DTLS association — token p99 **1.96 ms** | 2 independent QUIC streams (DataChannel + AU pipeline) — token p99 **365 µs** — **5.4×** because per-stream flow control prevents the video burst from HOL-blocking tokens |
-| [8 tool calls, 1 stalled 200 ms](feed/bidi_bench_test.go) | All 8 calls serialized on one shared bidi stream — median **251 ms** | `BidiPerCall` — fresh bidi stream per call, dispatched concurrently — median **13 ms** — **20×** because the stalled call no longer head-of-line-blocks the other seven |
-| [Video recovery after packet loss (2 s GOP)](testing/benchmarks/video/keyframe_recovery_test.go) | Subscriber waits passively for the next natural keyframe — mean **2.03 s** | Subscriber-driven `Client.RequestKeyframe()` → publisher encoder flush — mean **33 ms** — **62×** by closing the loop instead of waiting a GOP |
-| [Telemetry during video burst](testing/benchmarks/telemetry/datagram_realquic_test.go) | Telemetry on a reliable QUIC uni stream alongside video — mean **285 µs** | Raw QUIC datagrams with a 4-byte envelope — mean **175 µs** — **1.6× lower mean** by bypassing per-stream flow control and retransmits (p99 is noisy on loopback) |
-| [Wi-Fi → cellular handoff (vs. WebRTC)](testing/benchmarks/resume/resume_bench_test.go) | WebRTC ICE restart (production-recommended pattern) — mean **79 ms** | QUIC 0-RTT session resume on the existing connection ID — mean **0.89 ms** — **88×** because no rehandshake / no new ICE round-trips |
-| [WAN multi-stream (50 ms RTT)](testing/wan_bench/) | pion WebRTC, screen burst + 200 tok/s on one PeerConnection — token p99 **378 ms** | One quicrtc session, per-track delivery classes — token p99 **47 ms** — **8.0×** because the screen burst stays in its own QUIC stream's flow-control window |
-| [1:N broadcast to 4 subscribers](testing/benchmarks/fanout/live_broadcast_test.go) | pion SFU: 1+N PeerConnections, per-sub data channel, DTLS+SCTP repack per hop — worst-sub p99 **8.42 ms** | Native relay: splice-forward QUIC stream messages, no re-encode — worst-sub p99 **4.62 ms** — **1.8×** by skipping the per-hop DTLS+SCTP repack |
+| Workload | Baseline | quicrtc | Result |
+|---|---|---|---|
+| [Open 4 concurrent streams cold (~50 ms RTT)](testing/benchmarks/setup/setup_bench_test.go) | 4 sequential TLS handshakes (typical multi-transport bring-up): p50 **647 ms** | one QUIC handshake replaces all four: p50 **167 ms** | **~4× vs serial multi-handshake bring-up; parity vs parallel-fanout HTTPS.** Serial is the realistic production pattern (auth/dependency ordering forces it); parallel-fanout is the engineered ideal. |
+| [Restore all streams after network drop (~50 ms RTT)](testing/benchmarks/resume/reattach_after_kill_test.go) | WebRTC ICE restart + SSE re-subscribe + HTTPS reconnect run concurrently in parallel (the engineered ideal — production stacks often serialize): p50 **233 ms** | UDP-kill + re-Dial with SessionID: p50 **160 ms** | **1.45× faster reconnect; saves ~73 ms.** One re-Dial restores all 4 tracks vs 3 concurrent reconnect chains; gap widens further when serialization is forced. |
+| [Telemetry latency under sustained video burst](testing/benchmarks/telemetry/datagram_realquic_test.go) | reliable QUIC uni stream alongside 60 Mbps video: mean **285 µs** | datagrams + 4-byte envelope: mean **175 µs** | **1.6× lower mean** — datagrams skip per-stream FC and retransmits. |
+| [Token streaming during a 60 Mbps screen burst (WAN, 50 ms RTT)](testing/wan_bench/client.go) | pion shared PeerConnection — token p50 **41 ms**, **p99 378 ms** | quicrtc per-track delivery classes — token p50 **37 ms**, **p99 47 ms** | **~1.1× lower at median; 8× lower at p99.** Per-stream FC isolates tokens from the video burst's HOL-blocking on shared SCTP. Real GCP cross-region. |
+| [Computer-use action→DOM RTT (real WAN, ~64 ms RTT)](testing/wan_bench/computer_use.go) | TCP-mux single connection (4-channel length-prefix mux): p50 **63 ms**, **p99 157 ms** | quicrtc per-track delivery: p50 **65 ms**, **p99 80 ms** | **Parity at median; ~2× lower at p99.** Per-stream FC isolates the action channel from screen-burst contention under real internet jitter. GCP us-east1 ↔ us-west1, 12 Mbps screen + 100 actions/s; same pattern holds at 60 Mbps (p99 81 ms vs 147 ms). |
+| [1:N fanout to 4 subscribers](testing/benchmarks/fanout/live_broadcast_test.go) | pion fanout (1+N PeerConnections, DTLS+SCTP repack per hop): worst-sub p99 **8.42 ms** | native relay (AU splice-forward, no per-hop re-encode): worst-sub p99 **4.62 ms** | **1.8× lower worst-sub p99** — relay splice-forwards QUIC streams; no per-hop re-encode. |
 
-> **⚠️** Loopback results vary in the real world with RTT, loss, and bandwidth. See [methodology](testing/benchmarks/METHODOLOGY.md).
+> **⚠️** Results vary with hardware, RTT, loss, and congestion. Rows 4–5 are cross-host (real GCP WAN); others use synthetic ~50 ms RTT (conservative for TCP). Pion baselines: no STUN. [Full methodology](testing/benchmarks/METHODOLOGY.md).
 
-**Where quicrtc wins** — workloads with multiple traffic shapes on one connection, where the structural advantage shows up:
+**Where quicrtc wins** — workloads where the structural advantages (per-track flow control, single connection lifecycle, in-band signaling) outpace quic-go's per-packet overhead:
 
-- **Multi-modal AI traffic** — video + tokens + tool calls + telemetry from one server to clients. Each track gets its own QUIC stream with its own flow-control window, so a video burst can't HOL-block tokens. Closed-loop computer-use (60 Mbps screen + 200 tok/s + 100 actions/s + dom_events on one session) holds token p99 under **5 ms** and action→DOM RTT p99 under **10 ms** with 100% delivery — see [`testing/benchmarks/agent/computer_use_test.go`](testing/benchmarks/agent/computer_use_test.go) for the asserted thresholds (representative run: 475 µs / 966 µs on macOS loopback).
-- **Stalled tool calls** — `BidiPerCall` opens a fresh bidi stream per call, so one slow call doesn't block the other seven (20× median speedup vs shared-stream serial).
-- **Packet-loss recovery** — subscriber-driven `RequestKeyframe()` flushes a fresh GOP in one frame interval (~33 ms) instead of waiting up to 2 s for the next natural keyframe.
-- **1:N fan-out** — native relay splice-forwards QUIC stream messages without re-encoding; SFU has to repack DTLS+SCTP at every hop.
-- **Mobile / network changes** — 0-RTT resume restores every track in ~1 ms on a new connection ID; WebRTC has to re-run its ICE candidate-gathering handshake (~80 ms) every time the network path changes.
+- **Multi-modal AI traffic under sustained contention** — when one workload (typically video at sustained bandwidth) shares a connection with latency-sensitive streams (tokens, control), quicrtc's per-track flow control prevents tail-latency interference. The WAN row above is the strongest evidence: 8× lower token p99 during a 60 Mbps screen burst at 50 ms RTT.
+- **Multi-stream connection lifecycle** — opening four streams costs one QUIC handshake (~3.9× faster than the typical serial multi-transport bring-up); reconnecting after a network drop restores all four with one re-Dial chain (~1.45× faster than reconnecting WebRTC + SSE + HTTPS in parallel).
+- **1:N fan-out** — native relay forwards QUIC stream messages without re-encoding; SFU has to repack DTLS+SCTP at every hop.
+- **Fire-and-forget telemetry** — QUIC datagrams skip per-stream flow control and retransmits entirely, giving lower-latency telemetry alongside reliable streams.
 
 **Where quicrtc doesn't win:**
 
@@ -95,9 +93,19 @@ Real numbers from the benchmark suite in the repo, run on Apple Silicon loopback
 
 - Go 1.26+ (1.25+ works for core library; 1.26+ required for testing/benchmarks/browser)
 - Node 18+ for the TypeScript SDK
-- A browser with WebTransport: Chrome / Edge 114+, Safari 26.4+
-  (Baseline since Mar 2026), or Firefox with
+- A browser with WebTransport: Chrome / Edge 114+, Safari 18.2+
+  (GA December 2024, no flag), or Firefox with
   `network.webtransport.enabled` set
+
+## Install
+
+```bash
+go get github.com/sachinkesiraju/quicrtc@latest   # Go server / client
+npm install quicrtc                                # TypeScript browser SDK
+```
+
+Deploying? See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for TLS, scaling, and resource sizing.
+Hitting a wall? [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) covers cert pinning, Safari quirks, and CORS.
 
 ## Quick start
 
@@ -137,10 +145,6 @@ For a full runnable program with cert generation and graceful
 shutdown, see [`examples/publisher/`](examples/publisher/).
 
 ### Client (TypeScript)
-
-```bash
-npm install quicrtc
-```
 
 ```typescript
 import { QuicRTCClient, decodeDatagram } from 'quicrtc';
@@ -275,6 +279,7 @@ head-to-head numbers in the [benchmark suite](testing/benchmarks/).
 Pre-1.0. The wire format is stable across the Go and TypeScript
 clients; the public API may shift before v1.0. Current work tracked
 in [GitHub Issues](https://github.com/sachinkesiraju/quicrtc/issues).
+Release notes: [`docs/CHANGELOG.md`](docs/CHANGELOG.md).
 
 ## Contributing
 
@@ -290,4 +295,4 @@ Apache License 2.0 — see [`LICENSE`](LICENSE) for the full text.
 
 The stream-per-GOP pattern is inspired by IETF moq-lite's
 group-as-stream model. quicrtc is **not** wire-compatible with MoQ.
-SPEC: see [`docs/spec.md`](docs/spec.md).
+See the [SPEC](docs/SPEC.MD).

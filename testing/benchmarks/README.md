@@ -92,7 +92,7 @@ independent QUIC streams.
 | Native iOS/Android apps                   | libwebrtc ships in iOS WebKit and Android Chrome; quicrtc Phase 4 work   |
 | Audio AEC/NS/AGC                          | `getUserMedia` returns processed audio via libwebrtc; we piggyback but don't ship our own pipeline |
 | Production SFU ecosystem                  | LiveKit / Daily / Mediasoup ship recording, transcription, layer switching policies, compliance — out of scope here |
-| Spec maturity for risk-averse buyers      | WebRTC is an RFC; quicrtc's wire format ([`../docs/spec.md`](../docs/spec.md)) isn't a standard |
+| Spec maturity for risk-averse buyers      | WebRTC is an RFC; quicrtc's wire format ([`../../docs/SPEC.MD`](../../docs/SPEC.MD)) isn't a standard |
 
 ## Reproducing
 

@@ -50,7 +50,7 @@ import (
 )
 
 const (
-	resumeN           = 30
+	resumeN           = 100 // bumped from 30: methodology floor is ≥100
 	resumeWarmup      = 3
 	resumeBootstrap   = 1000
 	resumeSeed        = int64(1)

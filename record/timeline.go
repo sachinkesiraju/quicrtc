@@ -79,7 +79,7 @@ type Track struct {
 // briefly inside ReadPayload, so there is no long-lived descriptor to
 // leak.
 func BuildTimeline(path string) (*Timeline, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- path is a caller-supplied recording file, not untrusted input
 	if err != nil {
 		return nil, err
 	}

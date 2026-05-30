@@ -969,6 +969,7 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 					if r.URL.RawQuery != "" {
 						target += "?" + r.URL.RawQuery
 					}
+					// #nosec G710 -- redirect host is the trusted InstanceAddr from the session store; only this request's own path/query are appended, so the authority can't be hijacked.
 					http.Redirect(w, r, target, http.StatusTemporaryRedirect)
 					return
 				}

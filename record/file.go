@@ -77,7 +77,9 @@ func NewFileRecorderDepth(path string, depth int) (Recorder, error) {
 	if depth <= 0 {
 		depth = DefaultChannelDepth
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	// 0600: a session recording may hold sensitive agent data, so keep it
+	// owner-only. G304 here is a caller-supplied output path.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600) // #nosec G304
 	if err != nil {
 		return nil, err
 	}

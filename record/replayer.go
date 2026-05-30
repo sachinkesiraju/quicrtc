@@ -23,7 +23,7 @@ type Replayer struct {
 
 // Open opens path for replay. The caller must call Close when done.
 func Open(path string) (*Replayer, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304 -- path is a caller-supplied recording file, not untrusted input
 	if err != nil {
 		return nil, err
 	}

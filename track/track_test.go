@@ -13,8 +13,8 @@ func TestVideoPreset(t *testing.T) {
 	if v.Codec != "avc1.42E01F" {
 		t.Fatalf("codec: got %q", v.Codec)
 	}
-	if v.Priority != PriorityHigh {
-		t.Fatalf("priority: got %d want %d", v.Priority, PriorityHigh)
+	if v.Priority != PriorityNormal {
+		t.Fatalf("priority: got %d want %d", v.Priority, PriorityNormal)
 	}
 }
 

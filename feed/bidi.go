@@ -156,28 +156,49 @@ func (p *Pump) runBidiPerCall(ctx context.Context, recv *pubsub.Receiver) error 
 				p.cfg.OnWriteBytes(wire.FeedHeaderLen + len(au.Bytes))
 			}
 
-			// Drain response, bounded by MaxBidiResponse so a hostile
-			// peer can't OOM the server by responding with a multi-GB
-			// payload. Read at most maxResp+1 bytes so we can detect
-			// the exact-boundary case (n == maxResp+1 means the peer
-			// had more to send); on overflow we CancelRead to release
-			// flow-control credit.
-			if p.cfg.OnBidiResponse != nil {
-				resp, readErr := io.ReadAll(io.LimitReader(stream, maxResp+1))
-				if int64(len(resp)) > maxResp {
-					resp = resp[:maxResp]
+			// Response handling.
+			//
+			// Fire-and-forget (OnBidiResponse == nil): the caller does
+			// not consume responses — a computer-use action whose result
+			// comes back on a different track is the canonical case. We
+			// MUST NOT block reading a response that may never arrive.
+			// The read side has no deadline of its own, so a peer that
+			// never FINs would pin this stream — and a concurrent-stream
+			// slot — indefinitely; under a fire-every-AU workload that
+			// slot leak is what starved OpenBidiStream and produced the
+			// multi-second action tail. CloseWrite already delivered the
+			// request, so the call is complete: cancel the read now.
+			if p.cfg.OnBidiResponse == nil {
+				stream.CancelRead(0)
+				return
+			}
+
+			// Response wanted: read it, bounded by MaxBidiResponse so a
+			// hostile peer can't OOM us, AND bounded in time by callCtx
+			// so BidiCallTimeout actually caps open-through-read the way
+			// this type's doc comment promises. The BidiStream interface
+			// exposes no SetReadDeadline, so a watchdog cancels the read
+			// when the call budget expires; readDone stops the watchdog
+			// once the read returns on its own. Read at most maxResp+1
+			// bytes so we can detect the exact-boundary overflow case.
+			readDone := make(chan struct{})
+			go func() {
+				select {
+				case <-callCtx.Done():
 					stream.CancelRead(0)
-					if readErr == nil {
-						readErr = fmt.Errorf("%w: limit=%d", ErrBidiResponseTooLarge, maxResp)
-					}
+				case <-readDone:
 				}
-				p.cfg.OnBidiResponse(au.Seq, resp, readErr)
-			} else {
-				n, _ := io.Copy(io.Discard, io.LimitReader(stream, maxResp+1))
-				if n > maxResp {
-					stream.CancelRead(0)
+			}()
+			resp, readErr := io.ReadAll(io.LimitReader(stream, maxResp+1))
+			close(readDone)
+			if int64(len(resp)) > maxResp {
+				resp = resp[:maxResp]
+				stream.CancelRead(0)
+				if readErr == nil {
+					readErr = fmt.Errorf("%w: limit=%d", ErrBidiResponseTooLarge, maxResp)
 				}
 			}
+			p.cfg.OnBidiResponse(au.Seq, resp, readErr)
 		}(au)
 	}
 }

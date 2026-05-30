@@ -475,7 +475,11 @@ func (c *Client) Publish(ctx context.Context, lt track.LocalTrack) (Sender, erro
 	c.pubCancels = append(c.pubCancels, cancel)
 	c.pubMu.Unlock()
 	recv := bc.Subscribe()
-	cfg := feed.Config{TrackName: name}
+	cfg := feed.Config{
+		TrackName: name,
+		Delivery:  clientPublishDelivery(lt.Kind),
+		Priority:  uint8(track.DefaultPriority(lt.Kind)),
+	}
 	go func() {
 		p := feed.New(&clientUniOpener{wt: c.wt}, cfg)
 		_ = p.Run(pumpCtx, recv)
@@ -488,6 +492,27 @@ func (c *Client) removePubTrack(name string) {
 	c.pubMu.Lock()
 	defer c.pubMu.Unlock()
 	delete(c.pubTracks, name)
+}
+
+// clientPublishDelivery picks the feed delivery class for a track the
+// client publishes (PublishBack). The client publish path drives a
+// single uni-stream opener, so video keeps stream-per-GOP and every
+// other kind rides ONE persistent low-latency stream.
+//
+// This deliberately does not use BidiPerCall or DatagramOrStream for
+// client→server tracks: a client Sender.Send enqueues and returns with
+// no response plumbing on this side, so the traffic is fire-and-forget
+// and a single low-latency lane is the right shape. Crucially it avoids
+// the GOP pump's open-a-new-uni-stream-per-keyframe behavior — for a
+// fire-every-AU-as-keyframe workload (e.g. 100 computer-use actions/sec,
+// each Keyframe=true) that churned ~100 stream opens/sec and could
+// exhaust the peer's uni-stream credit, producing the multi-second tail
+// stalls seen on the WAN computer-use action path.
+func clientPublishDelivery(k track.Kind) track.DeliveryClass {
+	if k == track.KindVideo || k == "" {
+		return track.DeliveryStreamGOP
+	}
+	return track.DeliveryStreamLowLatency
 }
 
 // Sender is the publisher-side handle for one outbound track.

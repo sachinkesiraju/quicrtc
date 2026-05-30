@@ -1,9 +1,32 @@
 package pubsub
 
 import (
+	"errors"
 	"sort"
 	"sync"
 )
+
+// Interceptor inspects or transforms an AU before fanout. Returning
+// ErrDropAU silently drops the AU: no fanout, no replay-buffer write,
+// no keyframe-cache update. Any other non-nil error is treated the
+// same way (drop with no propagation).
+//
+// Interceptors MUST NOT call back into the broadcaster (Subscribe,
+// Publish, Count, etc.). That's not a deadlock (different mutex), but
+// the resulting recursive subscribe-during-publish pattern is unsafe.
+//
+// Late-joiner replay carries POST-interceptor bytes: the latestKeyframe
+// cached for new subscribers is the AU after the chain ran, and replay
+// buffer entries are likewise post-chain. This is intended, so PII
+// redaction or content moderation applies uniformly to every
+// subscriber including late joiners.
+type Interceptor func(au AccessUnit) (AccessUnit, error)
+
+// ErrDropAU is returned by an Interceptor to drop the AU without
+// fanning it out. The drop is silent: no error logged, no metric
+// emitted by the broadcaster itself. Interceptors that want drop
+// observability should record their own counters.
+var ErrDropAU = errors.New("pubsub: AU dropped by interceptor")
 
 // Receiver is one subscriber handle. The caller reads from Frames()
 // in a loop; quicrtc closes the channel when Unsubscribe is called.
@@ -43,6 +66,13 @@ func (r *Receiver) NeedsKeyframe() bool {
 	return r.needKeyframe
 }
 
+// QueueDepth returns the count of AUs currently buffered in the
+// receiver's channel waiting to be picked up. Lock-free, cheap to
+// call on the observability path.
+func (r *Receiver) QueueDepth() int {
+	return len(r.ch)
+}
+
 // Broadcaster fans access units out to all current subscribers.
 // One producer goroutine calls Publish; many consumer goroutines (one
 // per subscriber session) read from their Receiver.Frames().
@@ -72,6 +102,17 @@ type Broadcaster struct {
 	replayCap      int
 	replayBytes    int64
 	replayMaxBytes int64
+
+	// Interceptor chain. Held under its own RWMutex so AddInterceptor
+	// (a control-plane op) doesn't contend with the hot fanout path on
+	// b.mu. Run at the top of Publish before the size cap is re-checked.
+	interceptorsMu sync.RWMutex
+	interceptors   []Interceptor
+	// nextInterceptorID assigns stable removal handles to registered
+	// interceptors. We can't compare function values in Go, so we
+	// pair each function with an ID and the remove closure deletes by ID.
+	nextInterceptorID uint64
+	interceptorIDs    []uint64
 }
 
 // NewBroadcaster constructs a fresh Broadcaster. chanSize sets the
@@ -422,18 +463,91 @@ func (b *Broadcaster) Count() int {
 	return len(b.receivers)
 }
 
+// AddInterceptor registers fn at the end of the interceptor chain.
+// Returns a function that removes this specific interceptor from the
+// chain when called (idempotent: calling it twice is a no-op).
+//
+// Safe to call concurrently with Publish: the chain is read under an
+// RWMutex; AddInterceptor briefly takes the write lock to append.
+// Hot-path overhead when no interceptors are registered: one RLock +
+// length check (~25 ns uncontended).
+func (b *Broadcaster) AddInterceptor(fn Interceptor) (remove func()) {
+	if fn == nil {
+		return func() {}
+	}
+	b.interceptorsMu.Lock()
+	b.nextInterceptorID++
+	id := b.nextInterceptorID
+	// Allocate fresh backing arrays on every mutation so any reader
+	// that captured the previous slice header (under RLock, then
+	// released) continues to iterate a stable, untouched array even
+	// if a concurrent AddInterceptor/remove happens before they finish.
+	nextFns := make([]Interceptor, len(b.interceptors)+1)
+	copy(nextFns, b.interceptors)
+	nextFns[len(b.interceptors)] = fn
+	nextIDs := make([]uint64, len(b.interceptorIDs)+1)
+	copy(nextIDs, b.interceptorIDs)
+	nextIDs[len(b.interceptorIDs)] = id
+	b.interceptors = nextFns
+	b.interceptorIDs = nextIDs
+	b.interceptorsMu.Unlock()
+	return func() {
+		b.interceptorsMu.Lock()
+		defer b.interceptorsMu.Unlock()
+		for i, gotID := range b.interceptorIDs {
+			if gotID == id {
+				nextFns := make([]Interceptor, 0, len(b.interceptors)-1)
+				nextFns = append(nextFns, b.interceptors[:i]...)
+				nextFns = append(nextFns, b.interceptors[i+1:]...)
+				nextIDs := make([]uint64, 0, len(b.interceptorIDs)-1)
+				nextIDs = append(nextIDs, b.interceptorIDs[:i]...)
+				nextIDs = append(nextIDs, b.interceptorIDs[i+1:]...)
+				b.interceptors = nextFns
+				b.interceptorIDs = nextIDs
+				return
+			}
+		}
+	}
+}
+
 // Publish fans one access unit out to every subscriber. The caller
 // must not mutate au.Bytes after Publish — the same slice is shared
 // with every receiver.
+//
+// Pipeline order:
+//
+//  1. Interceptors (may transform au.Bytes or return ErrDropAU)
+//  2. Per-AU size cap re-check (so an interceptor cannot bypass the
+//     16 MiB ceiling that bounds receiver memory)
+//  3. Keyframe cache + replay-buffer append
+//  4. Fanout to every receiver
 //
 // We snapshot the receiver set under b.mu and release it before
 // iterating, so Subscribe / Unsubscribe / Count never block the
 // per-frame fanout from another goroutine.
 func (b *Broadcaster) Publish(au AccessUnit) {
-	// Per-AU size cap: drop oversized AUs before they enter any
+	// 1. Run the interceptor chain. RLock so concurrent Publishes
+	//    on different broadcasters don't contend, and the same-broadcaster
+	//    case (one publisher goroutine) sees no contention either.
+	b.interceptorsMu.RLock()
+	chain := b.interceptors
+	b.interceptorsMu.RUnlock()
+	for _, fn := range chain {
+		next, err := fn(au)
+		if err != nil {
+			// ErrDropAU or any other non-nil error: drop silently.
+			// Receivers see no fanout; replay buffer is not updated.
+			return
+		}
+		au = next
+	}
+
+	// 2. Per-AU size cap: drop oversized AUs before they enter any
 	// receiver's queue. This bounds memory at chanSize × maxAUBytes
 	// per receiver. Default cap matches wire.MaxFeedPayload so
-	// anything that fits the wire fits memory.
+	// anything that fits the wire fits memory. Re-checked AFTER the
+	// interceptor chain so a buggy interceptor that grows au.Bytes
+	// cannot blow past the ceiling.
 	b.mu.Lock()
 	maxAU := b.maxAUBytes
 	if maxAU > 0 && int64(len(au.Bytes)) > maxAU {

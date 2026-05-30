@@ -19,6 +19,7 @@ import {
   FrameFlags,
   FrameType,
   Hello,
+  KindStats,
   LocalTrack,
   RemoteTrack,
   Resume,
@@ -39,6 +40,8 @@ import {
   readFeedFrame,
   unmarshalAnnounce,
   unmarshalBackpressure,
+  unmarshalError,
+  unmarshalKindStats,
   unmarshalSDP,
   unmarshalUnannounce,
   writeControlFrame,
@@ -202,14 +205,19 @@ export class TrackReceiver {
    * If the track has buffered AUs, returns immediately with the
    * oldest one. Concurrent recv() calls are served FIFO.
    */
-  recv(timeoutMs?: number): Promise<AccessUnit> {
+  recv(timeoutMs?: number, signal?: AbortSignal): Promise<AccessUnit> {
     if (this.closed) {
       return Promise.reject(new ClientError('track closed', 'closed'));
+    }
+    if (signal?.aborted) {
+      return Promise.reject(new DOMException('aborted', 'AbortError'));
     }
     if (this.queue.length > 0) {
       return Promise.resolve(this.queue.shift()!);
     }
     return new Promise<AccessUnit>((resolve, reject) => {
+      let onAbort: (() => void) | undefined;
+      const detach = () => { if (onAbort && signal) signal.removeEventListener('abort', onAbort); };
       const waiter: {
         resolve: (au: AccessUnit) => void;
         reject: (err: Error) => void;
@@ -217,10 +225,12 @@ export class TrackReceiver {
       } = {
         resolve: (au: AccessUnit) => {
           if (waiter.timer) clearTimeout(waiter.timer);
+          detach();
           resolve(au);
         },
         reject: (err: Error) => {
           if (waiter.timer) clearTimeout(waiter.timer);
+          detach();
           reject(err);
         },
       };
@@ -232,8 +242,19 @@ export class TrackReceiver {
           const idx = this.waiters.indexOf(waiter);
           if (idx !== -1) this.waiters.splice(idx, 1);
           waiter.timer = undefined;
-          reject(new ClientError(`recv timeout on track "${this.name}"`, 'recv_timeout'));
+          waiter.reject(new ClientError(`recv timeout on track "${this.name}"`, 'recv_timeout'));
         }, timeoutMs);
+      }
+      if (signal) {
+        // Abort must REMOVE the waiter from the queue; otherwise a later AU
+        // would be handed to this orphaned (already-rejected) waiter by
+        // deliver() and silently dropped.
+        onAbort = () => {
+          const idx = this.waiters.indexOf(waiter);
+          if (idx !== -1) this.waiters.splice(idx, 1);
+          waiter.reject(new DOMException('aborted', 'AbortError'));
+        };
+        signal.addEventListener('abort', onAbort, { once: true });
       }
       this.waiters.push(waiter);
     });
@@ -487,6 +508,9 @@ export class QuicRTCClient {
   private reconnectTimer?: ReturnType<typeof setTimeout>;
 
   private backpressureCallbacks: ((trackName: string, level: number) => void)[] = [];
+  private announceCallbacks: ((track: RemoteTrack) => void)[] = [];
+  private unannounceCallbacks: ((name: string) => void)[] = [];
+  private kindStatsCallbacks: ((ks: KindStats) => void)[] = [];
 
   constructor(private readonly opts: QuicRTCClientOptions = {}) {
     // Initialize closePromise eagerly so concurrent close() calls all
@@ -564,10 +588,10 @@ export class QuicRTCClient {
   }
 
   /** RecvOn — recv from a specific track by name. */
-  async recvOn(trackName: string, timeoutMs?: number): Promise<AccessUnit> {
+  async recvOn(trackName: string, timeoutMs?: number, signal?: AbortSignal): Promise<AccessUnit> {
     validateLocalTrackName(trackName);
     const track = this.getOrCreateTrack(trackName);
-    return track.recv(timeoutMs);
+    return track.recv(timeoutMs, signal);
   }
 
   /** OnTrack — subscribe in push mode. */
@@ -720,6 +744,33 @@ export class QuicRTCClient {
     const i = this.backpressureCallbacks.indexOf(cb);
     if (i !== -1) this.backpressureCallbacks.splice(i, 1);
   }
+  /** OnAnnounce — fires when the server announces a new remote track. */
+  onAnnounce(cb: (track: RemoteTrack) => void): void {
+    this.announceCallbacks.push(cb);
+  }
+  offAnnounce(cb: (track: RemoteTrack) => void): void {
+    const i = this.announceCallbacks.indexOf(cb);
+    if (i !== -1) this.announceCallbacks.splice(i, 1);
+  }
+  /** OnUnannounce — fires when the server retracts a remote track. */
+  onUnannounce(cb: (name: string) => void): void {
+    this.unannounceCallbacks.push(cb);
+  }
+  offUnannounce(cb: (name: string) => void): void {
+    const i = this.unannounceCallbacks.indexOf(cb);
+    if (i !== -1) this.unannounceCallbacks.splice(i, 1);
+  }
+  /**
+   * OnKindStats — fires for each per-Kind stats report the server pushes
+   * (TypeKindStats, ~1 Hz when the "kind-stats" feature is negotiated).
+   */
+  onKindStats(cb: (ks: KindStats) => void): void {
+    this.kindStatsCallbacks.push(cb);
+  }
+  offKindStats(cb: (ks: KindStats) => void): void {
+    const i = this.kindStatsCallbacks.indexOf(cb);
+    if (i !== -1) this.kindStatsCallbacks.splice(i, 1);
+  }
 
   /** Close — idempotent; concurrent calls share the same promise. */
   async close(): Promise<void> {
@@ -731,6 +782,13 @@ export class QuicRTCClient {
     // Abort all reading loops first so their await reader.read()
     // calls unblock and the goroutines can exit.
     this.abortController.abort();
+
+    // Cancel the held datagram reader so a blocked receiveDatagram() (e.g.
+    // the viewer's datagram drain loop) unblocks instead of leaking.
+    if (this.datagramReader) {
+      try { await this.datagramReader.cancel(); } catch { /* ignore */ }
+      this.datagramReader = undefined;
+    }
 
     // Close per-track receivers (rejects pending recv() calls).
     for (const t of this.tracks.values()) t.close();
@@ -883,8 +941,7 @@ export class QuicRTCClient {
     });
 
     if (sdpFrame.type === FrameType.Error) {
-      const msg = new TextDecoder().decode(sdpFrame.payload);
-      throw new ClientError(`server rejected: ${msg}`, 'rejected');
+      throw new ClientError(`server rejected: ${this.formatServerError(sdpFrame.payload)}`, 'rejected');
     }
     if (sdpFrame.type !== FrameType.SDP) {
       throw new ClientError(`expected SDP, got frame type 0x${sdpFrame.type.toString(16)}`, 'protocol');
@@ -939,8 +996,11 @@ export class QuicRTCClient {
             case FrameType.Backpressure:
               this.handleBackpressure(payload);
               break;
+            case FrameType.KindStats:
+              this.handleKindStats(payload);
+              break;
             case FrameType.Error:
-              throw new ClientError(`server error: ${new TextDecoder().decode(payload)}`, 'server_error');
+              throw new ClientError(`server error: ${this.formatServerError(payload)}`, 'server_error');
             case FrameType.Close:
               await this.close();
               return;
@@ -1110,14 +1170,18 @@ export class QuicRTCClient {
       // control reader.
       return;
     }
-    this.remoteTracks.set(a.name, {
+    const rt: RemoteTrack = {
       name: a.name,
       kind: a.kind as TrackKind,
       codec: a.codec,
-    });
+    };
+    this.remoteTracks.set(a.name, rt);
     // Pre-create the track so concurrent recvOn() before the first
     // feed stream lands has a queue to wait on.
     this.getOrCreateTrack(a.name);
+    for (const cb of this.announceCallbacks) {
+      try { cb(rt); } catch (e) { console.error('announce callback threw:', e); }
+    }
   }
 
   private handleUnannounce(payload: Uint8Array): void {
@@ -1137,6 +1201,9 @@ export class QuicRTCClient {
       // Close — pending recv() callers should learn the track is gone.
       t.close();
     }
+    for (const cb of this.unannounceCallbacks) {
+      try { cb(u.name); } catch (e) { console.error('unannounce callback threw:', e); }
+    }
   }
 
   private handleBackpressure(payload: Uint8Array): void {
@@ -1151,6 +1218,29 @@ export class QuicRTCClient {
     for (const cb of this.backpressureCallbacks) {
       try { cb(trackName, level); } catch (e) { console.error('backpressure callback threw:', e); }
     }
+  }
+
+  private handleKindStats(payload: Uint8Array): void {
+    let ks: KindStats;
+    try {
+      ks = unmarshalKindStats(payload);
+    } catch {
+      return;
+    }
+    for (const cb of this.kindStatsCallbacks) {
+      try { cb(ks); } catch (e) { console.error('kind-stats callback threw:', e); }
+    }
+  }
+
+  /**
+   * formatServerError renders a structured TypeError payload as
+   * "code: reason" (or whichever of the two is present). Legacy non-JSON
+   * payloads surface as their raw bytes (via unmarshalError).
+   */
+  private formatServerError(payload: Uint8Array): string {
+    const e = unmarshalError(payload);
+    if (e.code && e.reason) return `${e.code}: ${e.reason}`;
+    return e.code || e.reason || 'unknown error';
   }
 
   private getOrCreateTrack(name: string): TrackReceiver {

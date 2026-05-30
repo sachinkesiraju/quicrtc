@@ -13,8 +13,10 @@
 import {
   Announce,
   Backpressure,
+  ErrorPayload,
   FrameType,
   Hello,
+  KindStats,
   Resume,
   SDP,
   Unannounce,
@@ -231,6 +233,31 @@ export function unmarshalResume(data: Uint8Array): Resume { return unmarshal<Res
 
 export function marshalBackpressure(msg: Backpressure): Uint8Array { return marshal(msg); }
 export function unmarshalBackpressure(data: Uint8Array): Backpressure { return unmarshal<Backpressure>(data); }
+
+export function marshalKindStats(msg: KindStats): Uint8Array { return marshal(msg); }
+export function unmarshalKindStats(data: Uint8Array): KindStats { return unmarshal<KindStats>(data); }
+
+/**
+ * unmarshalError decodes a TypeError control-frame payload. New
+ * (v1.0.2+) servers send JSON ErrorPayload{code, reason}; older
+ * servers wrote plain bytes like []byte("auth"). When the payload
+ * isn't valid JSON or doesn't start with '{', the bytes are surfaced
+ * as {code: "", reason: <bytes>} so callers always get a usable
+ * struct.
+ */
+export function unmarshalError(data: Uint8Array): ErrorPayload {
+  if (data.length === 0) {
+    return { code: '' };
+  }
+  if (data[0] !== 0x7b /* '{' */) {
+    return { code: '', reason: new TextDecoder().decode(data) };
+  }
+  try {
+    return unmarshal<ErrorPayload>(data);
+  } catch {
+    return { code: '', reason: new TextDecoder().decode(data) };
+  }
+}
 
 // ============================================================================
 // Datagram envelope: [1B type][1B trackId][2B BE seq][payload]

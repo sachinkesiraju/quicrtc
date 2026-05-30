@@ -32,6 +32,8 @@ export type {
   Unannounce,
   Resume,
   Backpressure,
+  KindStats,
+  ErrorPayload,
   ClientOptions,
   TransportStats,
 } from './types.js';
@@ -55,6 +57,9 @@ export {
   unmarshalResume,
   marshalBackpressure,
   unmarshalBackpressure,
+  marshalKindStats,
+  unmarshalKindStats,
+  unmarshalError,
   encodeDatagram,
   decodeDatagram,
   BufferedReader,

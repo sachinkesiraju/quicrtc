@@ -1,6 +1,6 @@
 {
   "name": "quicrtc",
-  "version": "0.1.1",
+  "version": "1.0.2",
   "description": "Real-time transport for AI agent sessions over QUIC/WebTransport. TypeScript client, wire-compatible with the Go server.",
   "type": "module",
   "main": "dist/index.js",
@@ -9,25 +9,18 @@
     ".": {
       "import": "./dist/index.js",
       "types": "./dist/index.d.ts"
+    },
+    "./viewer": {
+      "import": "./dist/viewer/index.js",
+      "types": "./dist/viewer/index.d.ts"
+    },
+    "./viewer/react": {
+      "import": "./dist/viewer/react.js",
+      "types": "./dist/viewer/react.d.ts"
     }
   },
   "files": [
-    "dist/index.js",
-    "dist/index.js.map",
-    "dist/index.d.ts",
-    "dist/index.d.ts.map",
-    "dist/client.js",
-    "dist/client.js.map",
-    "dist/client.d.ts",
-    "dist/client.d.ts.map",
-    "dist/wire.js",
-    "dist/wire.js.map",
-    "dist/wire.d.ts",
-    "dist/wire.d.ts.map",
-    "dist/types.js",
-    "dist/types.js.map",
-    "dist/types.d.ts",
-    "dist/types.d.ts.map",
+    "dist",
     "README.md",
     "LICENSE"
   ],
@@ -35,8 +28,9 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "clean": "rm -rf dist src/*.js src/*.js.map src/*.d.ts examples/*.js",
-    "test": "tsc && node dist/wire.test.js",
+    "test": "tsc && node dist/wire.test.js && node dist/viewer/test.js",
     "bench": "tsc && node dist/benchmark.js",
+    "size-check": "tsc && node scripts/size-check.mjs",
     "prepublishOnly": "npm run clean && npm run test && npm run build"
   },
   "keywords": [
@@ -61,6 +55,14 @@
     "url": "https://github.com/sachinkesiraju/quicrtc/issues"
   },
   "homepage": "https://github.com/sachinkesiraju/quicrtc#readme",
+  "peerDependencies": {
+    "react": ">=18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "typescript": "^5.0.0"

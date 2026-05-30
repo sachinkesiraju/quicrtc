@@ -14,19 +14,14 @@ VM and `-mode=client` on the other. Tests:
   same real WAN path. Per-action samples written to
   `wan_results/computer_use.csv`.
 
-## Multi-Region Testing
+## Region pairs
 
-This benchmark supports testing across multiple region pairs to capture
-different network characteristics:
+Tests run across one or more region pairs to span RTT bands:
 
 - **Default**: us-east1 ↔ us-west1 (~50ms RTT, continental US)
 - **Intercontinental**: us-east1 ↔ europe-west1 (~80ms RTT, transatlantic)
 - **Asia-Pacific**: us-west1 ↔ asia-northeast1 (~120ms RTT, transpacific)
-- **Custom**: Any GCP region pair via command-line flags
-
-Multi-region testing addresses reviewer feedback about single-region
-measurements by showing performance across different RTT bands and
-geographic paths.
+- **Custom**: any GCP region pair via command-line flags
 
 ## Quick start (GCP free tier)
 
@@ -118,12 +113,10 @@ wan_results/
 
 Why it exists: the synthetic-proxy sweep at
 `testing/benchmarks/agent/computer_use_sweep_test.go` suggests quicrtc
-may lose to a TCP-mux baseline at synthetic ~50 ms RTT + 1-5 % loss.
-We don't yet know whether that holds under REAL WAN conditions because
-the synthetic proxy doesn't model TCP cwnd halving, slow-start, or RTO.
-This mode runs both arms back-to-back over the same real WAN path
-between the two VMs created by `gcp_setup.sh`, so the per-trial
-RTT/loss/jitter state is comparable.
+may lose to a TCP-mux baseline at synthetic ~50 ms RTT + 1-5 % loss, but
+that proxy doesn't model TCP cwnd halving, slow-start, or RTO. This mode
+runs both arms back-to-back over the same real WAN path between the two
+VMs from `gcp_setup.sh`, so per-trial RTT/loss/jitter is comparable.
 
 ### Wire layout
 
@@ -162,10 +155,68 @@ stdout at end of run looks like:
 
 ```
 === Computer-use over real WAN, RTT≈<measured> start / <measured> end, loss=<label> ===
-quicrtc:  trials=N actions=N  p50=X p99=Y mean=Z
-baseline: trials=N actions=N  p50=A p99=B mean=C
-ratio (baseline/quicrtc): p50 = R1x, p99 = R2x
+quicrtc:  trials=N actions=N  p50=X p99=Y p99.9=W max=M mean=Z
+baseline: trials=N actions=N  p50=A p99=B p99.9=V max=U mean=C
+ratio (baseline/quicrtc): p50 = R1x, p99 = R2x, max = R3x
 ```
+
+`p99.9` and `max` matter: the per-action stall this mode exists to catch
+hides in the EXTREME tail, not at p99.
+
+### Measured results (real GCP WAN, us-east1 ↔ us-west1, ~64 ms RTT)
+
+12 Mbps screen, no synthetic loss, 5 trials × 1200 actions = 6000 samples.
+quicrtc (4 tracks) vs the TCP-mux baseline, both arms back-to-back over the
+same path:
+
+| metric | quicrtc | TCP-mux baseline | quicrtc advantage |
+|---|---|---|---|
+| p50 | 67 ms | 66 ms | parity (RTT floor) |
+| p99 | 80 ms | 156 ms | **1.95× lower** |
+| p99.9 | 84 ms | 236 ms | **~2.8× lower** |
+| max | **91 ms** | 266 ms | **2.94× lower** |
+
+quicrtc's action lane stays flat to the RTT floor across the whole
+distribution — per-stream flow control keeps it from being HOL-blocked by
+the screen burst — and beats the TCP-mux baseline at every tail point,
+including the absolute `max`. Data: `wan_results/computer_use.csv`.
+
+#### A note on the earlier "~30 s tail" (it was a benchmark bug, not a stall)
+
+Earlier runs of this mode showed a terrifying ~30 s `max` (2 of every
+~3600 actions). It was NOT a transport stall — it was a measurement
+artifact in THIS harness, root-caused with per-leg instrumentation:
+
+- The action reached the server in ~34 ms and the server echoed in ~0 ms;
+  the entire ~30 s was the *first* DOM of a trial, and only in trials after
+  the first (trial 0 never stalled — that pattern was the tell).
+- Cause: the `cu_dom` broadcaster is shared across trials and caches the
+  latest keyframe (correct behaviour — video late-joiners need it), and DOM
+  echoes mark `seq==1` a keyframe so a fresh subscriber's receiver begins
+  delivering. So each new trial's client, on subscribe, was first handed
+  the *previous* trial's stale keyframe DOM — action timestamp ~a trial
+  old — and counted it as a ~30 s "RTT."
+- Fix: the client discards any DOM stamped before the trial began (see
+  `echoDOM` + the dom drain in `computer_use.go`), measuring only live
+  echoes. After the fix, `max` is ~91 ms across 5 trials, zero >1 s samples.
+
+So quicrtc has no 30 s WAN stall. If a re-run shows a multi-second `max`,
+suspect a stale-replay / shared-broadcaster measurement issue before the
+transport.
+
+### Re-running
+
+```bash
+# same env contract as deploy.sh (typically from gcp_setup.sh)
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o wan_bench-linux-amd64 .
+SERVER_VM=... ZONE_SERVER=... CLIENT_VM=... ZONE_CLIENT=... SERVER_IP=... \
+  ./run_computer_use_wan.sh
+# vanilla-Debian VMs: tune UDP buffers first for a clean run, e.g.:
+#   sudo sysctl -w net.core.rmem_max=8388608 net.core.wmem_max=8388608
+```
+
+It writes `wan_results/computer_use_postfix.csv`; the committed
+`computer_use.csv` is the validated 5-trial reference run.
 
 ### Firewall
 

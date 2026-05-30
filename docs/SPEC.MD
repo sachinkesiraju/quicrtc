@@ -1,4 +1,4 @@
-# Wire format — version 1
+# Wire format, version 1
 
 The on-the-wire protocol that quicrtc speaks. Any-language
 implementations can interop by following this document.
@@ -15,7 +15,7 @@ forward-compatible.
 Not wire-compatible with IETF Media-over-QUIC (MoQT). The
 stream-per-GOP pattern is structurally similar to moq-lite's
 group-as-stream model. The `relay` package speaks this same wire
-format end-to-end — relays are invisible to subscribers.
+format end-to-end, so relays are invisible to subscribers.
 
 ## Transport
 
@@ -35,7 +35,7 @@ format end-to-end — relays are invisible to subscribers.
 3. Client sends `HELLO`. Server validates and replies `SDP` (success)
    or `ERROR` (failure).
 4. On success, the server begins opening **unidirectional streams**
-   to the client carrying media (one stream per GOP — see below).
+   to the client carrying media (one stream per GOP; see below).
 
 ## Stream shapes
 
@@ -95,12 +95,13 @@ buffer keyed on `seq`; `seq` is informational/diagnostic only.
 | 0x0b | BACKPRESSURE | control | kind-aware slow-consumer hint (JSON: track, level) | v1 shipping |
 | 0x0c | UNANNOUNCE | control | track name (JSON) | v1 shipping |
 | 0x0d | RESUME | control | session resume request (JSON: sessionID) | v1 shipping |
+| 0x0e | KINDSTATS | control | per-Kind observability report (JSON: kind, last_seq, recv_p50_ms, recv_p99_ms, dropped) | v1.0.2 shipping, gated on `"kind-stats"` feature |
 | 0x20 | KEYFRAME | feed | codec payload (e.g. H.264 Annex B with SPS+PPS+IDR) | v1 shipping |
 | 0x21 | PFRAME | feed | codec payload | v1 shipping |
 | 0x22 | FRAME | feed | generic AU (non-video tracks: tokens, tool-calls, telemetry, custom codecs without GOP semantics) | v1 shipping |
 
 For `0x22 FRAME`, the flag bits map to abstract semantics:
-- `FlagKeyframe` (bit 0) means "self-contained checkpoint" —
+- `FlagKeyframe` (bit 0) means "self-contained checkpoint":
   receivers can decode/process from this AU without prior context.
 - `FlagDiscontinuity` (bit 1) means receivers should reset
   decoder/parser state before this AU.
@@ -115,7 +116,7 @@ Application-defined extensions SHOULD use `0x80..0xFF`.
 | Bit | Meaning |
 |-----|---------|
 | 0 | Keyframe (redundant with type, kept for relay-safe forwarding) |
-| 1 | Discontinuity — the receiver SHOULD reset its decoder before this AU |
+| 1 | Discontinuity: the receiver SHOULD reset its decoder before this AU |
 
 ## Handshake state machine
 
@@ -152,6 +153,12 @@ distributed out-of-band (e.g. URL fragment in a share link). The
 server MUST compare the slug constant-time. The slug is the security
 boundary; cert pinning + origin allow-list are defense in depth.
 
+ERROR frame payloads are JSON `{"code": "<string>", "reason":
+"<string>"}` as of v1.0.2. Legacy plain-bytes payloads are still
+valid; receivers SHOULD attempt JSON decode first and fall back to
+treating the bytes as `reason` with empty `code`. Defined codes:
+`auth`, `version`, `track_unauthorized`.
+
 ## Idle / liveness
 
 The server SHOULD enforce an idle timeout based on **feed-write
@@ -160,7 +167,7 @@ could otherwise pin a session indefinitely by spamming PINGs while
 never reading the feed (receiver-side flow control would block feed
 writes, but heartbeats would keep an "any activity" timer alive).
 
-PING/PONG MAY still be used by clients to measure RTT — they just
+PING/PONG MAY still be used by clients to measure RTT; they just
 must not be load-bearing for liveness.
 
 ## Drop policy (server-side)
@@ -182,12 +189,23 @@ loss without an opportunity to resync on a keyframe.
 
 ## Versioning
 
-The wire-format version is in `HELLO.ver`. Servers SHOULD reject
-mismatched majors. Currently shipping: `"1"`. v2 is reserved.
+The wire-format version is carried in `HELLO.ver`. Currently
+shipping: `"1"`. v2 is reserved.
 
-When v2 ships, HELLO will add a `tracks` array enumerating the
-intended track set (with `name`, `kind`, `priority`, optional
-`codec`), and feed frames will carry an optional metadata block:
+As of v1.0.2 HELLO also carries optional `min_ver` and `max_ver`
+fields describing the inclusive range of versions the client can
+speak; SDP echoes the chosen version back in `neg_ver`. Clients
+that send only `ver` (no min/max) are treated as
+`min=max=ver`, preserving the v0.1 behavior for back-compat.
+
+Negotiation rule: the server picks `min(client_max, server_max)`
+if that value is `>= max(client_min, server_min)`. Negotiation
+fails (server emits ERROR with `code="version"`) when the ranges
+do not overlap.
+
+A future v2 will add a `tracks` array enumerating the intended
+track set (with `name`, `kind`, `priority`, optional `codec`), and
+feed frames will carry an optional metadata block:
 
 ```
 [varint count]
@@ -208,7 +226,7 @@ to v1 framing.
   fan-out; for multi-publisher conferencing, use an SFU).
 - ANNOUNCE/SUBSCRIBE catalog (single static SDP suffices for one
   publisher).
-- NAT traversal (out-of-scope by design — bring your own gateway,
+- NAT traversal (out-of-scope by design; bring your own gateway,
   Tailscale, Cloudflare, etc.).
 - Audio framing (planned for v2).
 - DataChannel multiplexing (one channel per session in v1).

@@ -1,17 +1,19 @@
 # Architecture
 
-quicrtc is a single transport — native QUIC + WebTransport — under a
+quicrtc is a single transport (native QUIC + WebTransport) under a
 `PeerConnection`-style API. Same wire format end-to-end for direct
 publisher↔subscriber sessions and for relayed 1:N fan-out via the
 `relay` package.
 
 For the wire format, see [`SPEC.MD`](SPEC.MD).
 
+<p align="center"><img src="assets/architecture.svg" alt="quicrtc architecture: one QUIC/WebTransport connection under a PeerConnection-style API, carrying kind-tagged tracks and datagrams for both direct publisher↔subscriber sessions and relayed 1:N fan-out." width="820"></p>
+
 ## Why a new transport
 
 WebRTC was designed for browser↔browser video chat: symmetric,
 peer-to-peer, codec-gated by libwebrtc. AI streams have the opposite
-shape — server-originated, asymmetric, multi-modal (video, audio,
+shape: server-originated, asymmetric, multi-modal (video, audio,
 tokens, tool-calls, telemetry concurrently from one pipeline to many
 viewers). WebRTC handles this by faking a media source on the server,
 gating non-standard codecs, and bolting datachannels alongside RTP for
@@ -52,9 +54,18 @@ Fan-out:  Publisher ──► Relay (relay package) ──┬── Subscriber A
 ```
 
 The relay is a `server.Server` that also dials an upstream publisher
-as a `client.Client` and forwards AUs through its local broadcaster —
+as a `client.Client` and forwards AUs through its local broadcaster:
 no parse/re-encode, just splice forwarding. Subscribers can't tell
 they're talking to a relay vs a direct publisher.
+
+The broadcaster (`pubsub.Broadcaster`) also exposes an interceptor
+chain. Functions registered via `AddInterceptor` see every AU
+before fanout and may transform it, drop it (return `ErrDropAU`),
+or pass it through. This is the substrate session recording
+(`record/`), per-track auth filtering, and metrics export build on.
+The chain runs at the top of `Publish` before the size-cap
+re-check, so an interceptor that grows `au.Bytes` cannot bypass
+the 16 MiB ceiling.
 
 ## Delivery classes
 
@@ -66,7 +77,7 @@ dispatcher routes AUs to the matching path:
 | `KindVideo`         | `StreamGOP`         | One uni stream per keyframe; RESET on next GOP     |
 | `KindTokens`        | `StreamLowLatency`  | One persistent uni stream per track; pooled encoder |
 | `KindToolCalls`     | `BidiPerCall`       | One bidi stream per AU (RPC-shaped)                |
-| `KindTelemetry`     | `DatagramOrStream`  | QUIC datagrams with stream fallback intent        |
+| `KindTelemetry`     | `DatagramOrStream`  | QUIC datagrams, spills to a persistent uni stream when an AU exceeds path MTU or the datagram queue is full |
 
 `KindAudio` uses `StreamLowLatency` today; real-time audio framing
 (Opus + FEC + jitter buffer) is planned for Phase 3.

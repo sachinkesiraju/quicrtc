@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 500" role="img" aria-label="Side-by-side comparison. Left: today's AI agent stack glues four separate network protocols together — WebRTC for video, SSE for tokens, gRPC for tool calls, OTLP for telemetry — each on its own connection, with a video burst stalling the others behind it. Right: quicrtc carries all four on a single QUIC connection with isolated lanes, so a video burst stays in its lane and the other streams keep flowing.">
+  <defs>
+    <marker id="ba-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#475569"/>
+    </marker>
+    <marker id="ba-arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#047857"/>
+    </marker>
+    <style>
+      .panel-title { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 18px; font-weight: 700; }
+      .left-title  { fill: #b91c1c; }
+      .right-title { fill: #047857; }
+      .endpoint { fill: #f8fafc; stroke: #475569; stroke-width: 1.4; }
+      .endpoint-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; fill: #0f172a; font-weight: 600; }
+      .pipe-old     { fill: #fef2f2; stroke: #b91c1c; stroke-width: 1.2; }
+      .pipe-jammed  { fill: #fecaca; stroke: #991b1b; stroke-width: 1.5; }
+      .pipe-stalled { fill: #f3f4f6; stroke: #6b7280; stroke-width: 1.2; stroke-dasharray: 3 3; }
+      .tube { fill: #ecfdf5; stroke: #047857; stroke-width: 1.6; }
+      .lane-video  { fill: #fcd34d; stroke: #b45309; stroke-width: 1; }
+      .lane-tokens { fill: #bfdbfe; stroke: #1d4ed8; stroke-width: 1; }
+      .lane-tools  { fill: #c4b5fd; stroke: #6d28d9; stroke-width: 1; }
+      .lane-tele   { fill: #bbf7d0; stroke: #047857; stroke-width: 1; }
+      .row-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; fill: #0f172a; font-weight: 700; }
+      .row-tech  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 10px; fill: #475569; }
+      .lane-note { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 10px; fill: #166534; }
+      .footer { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; font-weight: 600; }
+      .footer-bad  { fill: #991b1b; }
+      .footer-good { fill: #047857; }
+      .burst { fill: #f97316; stroke: #c2410c; stroke-width: 1; }
+      .burst-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 10px; fill: #ffffff; font-weight: 700; text-anchor: middle; }
+      .queued { fill: #6b7280; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 10px; font-style: italic; }
+      .divider { stroke: #cbd5e1; stroke-width: 1; stroke-dasharray: 4 4; }
+      .conn-tag { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; font-weight: 700; fill: #047857; }
+    </style>
+  </defs>
+
+  <!-- =================== LEFT PANEL: TODAY =================== -->
+  <text class="panel-title left-title" x="225" y="32" text-anchor="middle">Today: four separate stacks</text>
+
+  <!-- server / client -->
+  <rect class="endpoint" x="20" y="62" width="70" height="380" rx="6"/>
+  <text class="endpoint-label" x="55" y="248" text-anchor="middle">Agent</text>
+  <text class="endpoint-label" x="55" y="265" text-anchor="middle">server</text>
+
+  <rect class="endpoint" x="360" y="62" width="70" height="380" rx="6"/>
+  <text class="endpoint-label" x="395" y="255" text-anchor="middle">User</text>
+
+  <!-- Row 1: video (with burst) -->
+  <text class="row-label" x="225" y="80" text-anchor="middle">video</text>
+  <rect class="pipe-jammed" x="95" y="86" width="260" height="26" rx="4"/>
+  <rect class="burst" x="207" y="89" width="46" height="20" rx="3"/>
+  <text class="burst-label" x="230" y="103">BURST</text>
+  <text class="row-tech"  x="225" y="128" text-anchor="middle">WebRTC · own handshake · own reconnect</text>
+
+  <!-- Row 2: LLM tokens — stalled, with queued indicator -->
+  <text class="row-label" x="225" y="156" text-anchor="middle">LLM tokens</text>
+  <rect class="pipe-stalled" x="95" y="162" width="260" height="26" rx="4"/>
+  <text class="queued" x="225" y="180" text-anchor="middle">⏸ queued behind the video burst</text>
+  <text class="row-tech"  x="225" y="204" text-anchor="middle">SSE over HTTP · own connection · own auth</text>
+
+  <!-- Row 3: tool calls -->
+  <text class="row-label" x="225" y="232" text-anchor="middle">tool calls</text>
+  <rect class="pipe-stalled" x="95" y="238" width="260" height="26" rx="4"/>
+  <text class="queued" x="225" y="256" text-anchor="middle">⏸ queued</text>
+  <text class="row-tech"  x="225" y="280" text-anchor="middle">gRPC · own connection · own retry</text>
+
+  <!-- Row 4: telemetry -->
+  <text class="row-label" x="225" y="308" text-anchor="middle">telemetry</text>
+  <rect class="pipe-stalled" x="95" y="314" width="260" height="26" rx="4"/>
+  <text class="queued" x="225" y="332" text-anchor="middle">⏸ queued</text>
+  <text class="row-tech"  x="225" y="356" text-anchor="middle">OTLP/HTTP · own connection · own batching</text>
+
+  <!-- footer -->
+  <text class="footer footer-bad" x="225" y="400" text-anchor="middle">4 connections · 4 handshakes · 4 reconnect chains</text>
+  <text class="footer footer-bad" x="225" y="420" text-anchor="middle">a video burst can stall the other three</text>
+
+  <!-- divider -->
+  <line class="divider" x1="460" y1="50" x2="460" y2="470"/>
+
+  <!-- =================== RIGHT PANEL: WITH QUICRTC =================== -->
+  <text class="panel-title right-title" x="680" y="32" text-anchor="middle">With quicrtc: one connection, four lanes</text>
+
+  <!-- server / client (positioned outside the tube so arrows go IN, not THROUGH) -->
+  <rect class="endpoint" x="475" y="62" width="70" height="380" rx="6"/>
+  <text class="endpoint-label" x="510" y="248" text-anchor="middle">Agent</text>
+  <text class="endpoint-label" x="510" y="265" text-anchor="middle">server</text>
+
+  <rect class="endpoint" x="815" y="62" width="70" height="380" rx="6"/>
+  <text class="endpoint-label" x="850" y="255" text-anchor="middle">User</text>
+
+  <!-- single fat tube — sits BETWEEN the endpoints with NO arrows piercing it -->
+  <rect class="tube" x="555" y="72" width="252" height="368" rx="14"/>
+  <text class="conn-tag" x="681" y="92" text-anchor="middle">ONE QUIC CONNECTION</text>
+
+  <!-- four lanes inside -->
+  <!-- Video lane with burst -->
+  <text class="row-label" x="681" y="118" text-anchor="middle">video lane</text>
+  <rect class="lane-video" x="565" y="124" width="232" height="26" rx="4"/>
+  <rect class="burst" x="643" y="127" width="46" height="20" rx="3"/>
+  <text class="burst-label" x="666" y="141">BURST</text>
+  <text class="lane-note" x="681" y="166" text-anchor="middle">burst stays in this lane</text>
+
+  <!-- Token lane -->
+  <text class="row-label" x="681" y="196" text-anchor="middle">token lane</text>
+  <rect class="lane-tokens" x="565" y="202" width="232" height="24" rx="4"/>
+  <text class="lane-note" x="681" y="242" text-anchor="middle">flows unblocked</text>
+
+  <!-- Tool-call lane -->
+  <text class="row-label" x="681" y="272" text-anchor="middle">tool-call lane</text>
+  <rect class="lane-tools" x="565" y="278" width="232" height="24" rx="4"/>
+  <text class="lane-note" x="681" y="318" text-anchor="middle">each call its own sub-lane</text>
+
+  <!-- Telemetry lane -->
+  <text class="row-label" x="681" y="348" text-anchor="middle">telemetry lane</text>
+  <rect class="lane-tele" x="565" y="354" width="232" height="24" rx="4"/>
+  <text class="lane-note" x="681" y="394" text-anchor="middle">fire and forget</text>
+
+  <!-- shared lifecycle tag inside tube -->
+  <text class="lane-note" x="681" y="420" text-anchor="middle" style="font-weight:700;">shared: one handshake · one reconnect</text>
+
+  <!-- footer OUTSIDE the tube, with margin -->
+  <text class="footer footer-good" x="681" y="464" text-anchor="middle">1 connection · 1 handshake · 1 re-dial restores all four</text>
+</svg>

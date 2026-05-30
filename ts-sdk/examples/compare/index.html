@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>quicrtc · naive vs multistream — side by side</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="bar">
+    <strong>quicrtc · contention compare</strong>
+    <span class="muted small">
+      One connection per pane. The browser drives identical CUA turns against both servers and
+      times each lane. Watch pane&nbsp;A's lanes <b>freeze</b> under a screen burst while pane&nbsp;B keeps flowing.
+    </span>
+    <span class="spacer"></span>
+    <button id="stop" class="ghost" hidden>stop</button>
+  </header>
+
+  <section id="connect-card" class="card connect">
+    <h2>connect both panes</h2>
+    <p class="muted small">
+      Start <code>cua/server -mode=naive -stress</code> and
+      <code>cua/server -mode=multistream -stress</code> (see README), then paste each share URL below.
+      Leave a field blank to skip that pane.
+    </p>
+    <form id="connect-form">
+      <label class="field">
+        <span class="field-label">Pane A — <b>naive</b> (single stream)</span>
+        <input id="url-a" type="url" autocomplete="off"
+          placeholder="https://127.0.0.1:NNNN/wt#slug=...&amp;hash=...  (mode=naive)" />
+      </label>
+      <label class="field">
+        <span class="field-label">Pane B — <b>multistream</b> (per-lane)</span>
+        <input id="url-b" type="url" autocomplete="off"
+          placeholder="https://127.0.0.1:NNNN/wt#slug=...&amp;hash=...  (mode=multistream)" />
+      </label>
+      <div class="controls">
+        <label class="inline">
+          turns/sec
+          <input id="turn-rate" type="number" min="1" max="200" value="20" />
+        </label>
+        <button type="submit">connect &amp; start driving</button>
+      </div>
+    </form>
+    <p id="connect-error" class="error" hidden></p>
+  </section>
+
+  <main id="panes" class="panes" hidden>
+    <!-- pane templates are cloned from #pane-template by compare.js -->
+  </main>
+
+  <template id="pane-template">
+    <section class="pane">
+      <header class="pane-head">
+        <span class="pane-title"></span>
+        <span class="pill" data-state="disconnected">disconnected</span>
+        <span class="pane-mode mono"></span>
+      </header>
+
+      <div class="screen-wrap">
+        <canvas class="screen-canvas" width="480" height="320"></canvas>
+        <div class="screen-meta">
+          <span class="screen-last">no frames</span>
+          <span class="screen-rate"></span>
+        </div>
+      </div>
+
+      <div class="lanes"></div>
+
+      <div class="feed-wrap">
+        <div class="feed-title">metadata / token feed</div>
+        <ul class="feed"></ul>
+      </div>
+    </section>
+  </template>
+
+  <template id="lane-template">
+    <div class="lane" data-lane="">
+      <div class="lane-head">
+        <span class="lane-name"></span>
+        <span class="lane-freeze" data-frozen="0">live</span>
+      </div>
+      <div class="lane-age"><b class="age-ms">—</b> since last update</div>
+      <div class="lane-stats mono">
+        <span>p50 <b class="p50">—</b></span>
+        <span>p99 <b class="p99">—</b></span>
+        <span>n <b class="n">0</b></span>
+      </div>
+    </div>
+  </template>
+
+  <script type="module" src="./compare.js"></script>
+</body>
+</html>

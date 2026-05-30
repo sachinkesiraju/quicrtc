@@ -3,6 +3,15 @@
 A deterministic CUA-shaped workload that **measures** the per-Kind
 dispatch advantage instead of just claiming it.
 
+## What this example does, in pictures
+
+Before getting into the comparison: here's what one "turn" of a computer-use agent actually looks like over the wire. The page being driven runs on the server; the agent loop runs as the client. Every arrow below is explained.
+
+<p align="center"><img src="../../docs/assets/cua_flow.svg" alt="Inside a computer-use agent: the server hosts the page being driven and continuously sends fresh screenshots to the agent loop. Per turn, the agent sends four small requests — do an action, snapshot accessibility, snapshot DOM, snapshot perf — and the server runs all four in parallel. The action result comes back on a reliable lane (it includes a fresh screenshot); the three small inspections come back as fire-and-forget packets." width="880"></p>
+
+The point of *this* example is to compare two ways the server can lay those messages out on the wire — see "What the comparison shows" below.
+
+
 > **What is real:** the wire, the per-Kind dispatch, the screen
 > stream (real PNG bytes), the measurement (real wall-time p50 /
 > p95 / max from real datagram round-trips).

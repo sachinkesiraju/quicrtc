@@ -3,10 +3,11 @@ module github.com/sachinkesiraju/quicrtc
 go 1.25.0
 
 require (
+	github.com/pion/rtcp v1.2.16
 	github.com/pion/webrtc/v4 v4.2.12
 	github.com/quic-go/quic-go v0.59.0
 	github.com/quic-go/webtransport-go v0.10.0
-	golang.org/x/net v0.50.0
+	golang.org/x/net v0.55.0
 )
 
 require (
@@ -19,7 +20,6 @@ require (
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/mdns/v2 v2.1.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/rtcp v1.2.16 // indirect
 	github.com/pion/rtp v1.10.1 // indirect
 	github.com/pion/sctp v1.9.5 // indirect
 	github.com/pion/sdp/v3 v3.0.18 // indirect
@@ -29,8 +29,8 @@ require (
 	github.com/pion/turn/v5 v5.0.3 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
-	golang.org/x/crypto v0.48.0 // indirect
-	golang.org/x/sys v0.42.0 // indirect
-	golang.org/x/text v0.34.0 // indirect
+	golang.org/x/crypto v0.51.0 // indirect
+	golang.org/x/sys v0.45.0 // indirect
+	golang.org/x/text v0.37.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )

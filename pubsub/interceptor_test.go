@@ -2,6 +2,7 @@ package pubsub
 
 import (
 	"errors"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -163,6 +164,13 @@ func TestInterceptorConcurrentRemoveDuringPublish(t *testing.T) {
 			}
 		}
 	}()
+
+	// Ensure the counting interceptor has fired at least once before we remove
+	// it, so the concurrent add/remove below races against live publishes and
+	// the calls>=1 assertion is deterministic rather than scheduler-dependent.
+	for calls.Load() == 0 {
+		runtime.Gosched()
+	}
 
 	for i := 0; i < 100; i++ {
 		_ = b.AddInterceptor(func(au AccessUnit) (AccessUnit, error) { return au, nil })

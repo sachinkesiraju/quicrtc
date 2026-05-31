@@ -11,8 +11,7 @@ on one capture clock, so the cross-lane reconstruction is *exact*. The
 gRPC + OTLP) where each lane has its own connection and clock — the panels
 drift apart and the skew chip jumps from `0 ms · exact` to a few hundred ms,
 so you can no longer say what the agent saw at the instant it acted. That's
-the observability payoff; the transport's *measured* performance lives in
-`testing/wan_bench` and `ts-sdk/examples/compare`.
+the observability payoff.
 
 ## Run it
 

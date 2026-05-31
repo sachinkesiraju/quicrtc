@@ -13,7 +13,7 @@ Most agent products today glue together separate transports — SSE for LLM toke
 
 All four tracks share QUIC's 0-RTT resume and connection migration, so reconnecting restores every workload in one round-trip instead of three handshakes.
 
-<p align="center"><img src="docs/assets/cua_flow.svg" alt="One QUIC connection carrying four parallel lanes during a computer-use agent turn: continuous screen video, the per-turn action request and result, and small snapshot datagrams." width="880"></p>
+<p align="center"><img src="docs/assets/overview.svg" alt="One QUIC connection from agent server to browser/client, carrying screen video, reasoning tokens, tool calls, and telemetry." width="640"></p>
 
 A track's `Kind` picks its wire shape. Video bursts and the token stream sit on separate QUIC streams and never share a send queue.
 

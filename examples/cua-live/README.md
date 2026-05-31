@@ -140,8 +140,9 @@ cd examples/replay/viewer && python3 -m http.server 5174         # open localhos
 ```
 
 Telemetry rides datagrams sent straight to each session rather than a
-published track, so the recording holds the screen, reasoning, and
-tool-call lanes.
+published track, so `-record` captures it on a separate timer — the
+`.qrtc` holds all four lanes (screen, reasoning, tool calls, telemetry)
+even with no viewer attached.
 
 ## Files
 

@@ -58,6 +58,7 @@ const (
 	trackScreen    = "screen"
 	trackReasoning = "reasoning"
 	trackToolCalls = "toolcalls"
+	trackTelemetry = "telemetry"
 
 	// telemetryTrackID is the 1-byte demux key in the datagram envelope
 	// (wire.EncodeDatagram). The viewer's decodeDatagram filters on it.
@@ -147,9 +148,12 @@ func main() {
 	reasoningPub := srv.AddTrackSpec(server.TrackSpec{Name: trackReasoning, Kind: track.KindTokens})
 	toolPub := srv.AddTrackSpec(server.TrackSpec{Name: trackToolCalls, Kind: track.KindToolCalls})
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+
 	// Optionally record the session. AttachRecorder installs a sink on
 	// every track's broadcaster, so the .qrtc captures exactly the AUs
-	// subscribers receive — all on one capture clock, which is what makes
+	// subscribers receive, all on one capture clock — which is what makes
 	// the replay scrubber's cross-lane reconstruction exact. Export it for
 	// the browser scrubber with:
 	//   go run ./examples/replay -file <path> -json -payloads > examples/replay/viewer/bundle.json
@@ -160,11 +164,13 @@ func main() {
 		}
 		detach := srv.AttachRecorder(rec)
 		defer func() { detach(); _ = rec.Close() }()
+		// Telemetry rides datagrams straight to each session rather than a
+		// published track, so AttachRecorder can't see it. Record it on its
+		// own goroutine so the .qrtc carries all four lanes even with no
+		// viewer attached.
+		go recordTelemetry(ctx, rec, st)
 		fmt.Printf("recording to %s — scrub with: go run ./examples/replay -file %s\n", *recordPath, *recordPath)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
-	defer stop()
 
 	go func() {
 		if err := srv.ListenAndServe(ctx); err != nil && ctx.Err() == nil {
@@ -413,6 +419,23 @@ func (a *agentLoop) publishScreen(ctx context.Context, png []byte, keyframe bool
 	a.seqScreen++
 }
 
+// telemetryBody is the JSON snapshot both the live datagram pump and the
+// recorder emit. The viewer's decodeDatagram and the replay scrubber both
+// render each key as a gauge.
+func telemetryBody(st *status.Status) []byte {
+	var ms runtime.MemStats
+	runtime.ReadMemStats(&ms)
+	return []byte(fmt.Sprintf(
+		`{"step":%d,"screen_frames":%d,"tokens":%d,"tool_calls":%d,"heap_mb":%d,"goroutines":%d}`,
+		st.Get("steps"),
+		st.Get("screen_au"),
+		st.Get("token_au"),
+		st.Get("action_au"),
+		ms.HeapAlloc/(1<<20),
+		runtime.NumGoroutine(),
+	))
+}
+
 // pumpTelemetry sends per-session agent telemetry over QUIC datagrams
 // at 2 Hz — the fourth lane. Each datagram uses wire.EncodeDatagram's
 // 4-byte envelope ([type][trackID][2B seq]) so the viewer's
@@ -429,17 +452,7 @@ func pumpTelemetry(h server.SessionHandle, st *status.Status) {
 			return
 		case <-tick.C:
 		}
-		var ms runtime.MemStats
-		runtime.ReadMemStats(&ms)
-		body := []byte(fmt.Sprintf(
-			`{"step":%d,"screen_frames":%d,"tokens":%d,"tool_calls":%d,"heap_mb":%d,"goroutines":%d}`,
-			st.Get("steps"),
-			st.Get("screen_au"),
-			st.Get("token_au"),
-			st.Get("action_au"),
-			ms.HeapAlloc/(1<<20),
-			runtime.NumGoroutine(),
-		))
+		body := telemetryBody(st)
 		// Reuse dst across sends. EncodeDatagram appends, so reset to
 		// zero length each time.
 		dst = dst[:0]
@@ -453,6 +466,30 @@ func pumpTelemetry(h server.SessionHandle, st *status.Status) {
 		}
 		st.Inc("telemetry_dg", 1)
 		st.Inc("telemetry_bytes", int64(len(env)))
+		seq++
+	}
+}
+
+// recordTelemetry writes a telemetry snapshot to the recording every
+// 500ms so the .qrtc carries the fourth lane. It emits the same JSON the
+// datagram pump sends, stamped on the recorder's shared capture clock,
+// and runs independently of subscribers so a -record run captures
+// telemetry even with no viewer attached. The recorder is concurrency-safe,
+// so this runs alongside the AttachRecorder interceptor on the other lanes.
+func recordTelemetry(ctx context.Context, rec record.Recorder, st *status.Status) {
+	tick := time.NewTicker(500 * time.Millisecond)
+	defer tick.Stop()
+	var seq uint32
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+		_ = rec.Write(trackTelemetry, string(track.KindTelemetry), pubsub.AccessUnit{
+			Bytes: telemetryBody(st),
+			Seq:   seq,
+		})
 		seq++
 	}
 }

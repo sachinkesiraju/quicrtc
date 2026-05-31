@@ -1,13 +1,14 @@
 package track
 
-// Video constructs a video track with sensible defaults: high
-// priority, codec-defined keyframe semantics on the wire.
+// Video constructs a video track with sensible defaults: bulk-lane
+// priority (below latency-sensitive tokens/tool-calls, above background
+// telemetry), codec-defined keyframe semantics on the wire.
 func Video(name, codec string) LocalTrack {
 	return LocalTrack{
 		Name:     name,
 		Kind:     KindVideo,
 		Codec:    codec,
-		Priority: PriorityHigh,
+		Priority: PriorityNormal,
 		Delivery: DefaultDeliveryClass(KindVideo),
 	}
 }

@@ -83,6 +83,14 @@ const (
 	// from FromSeq onward (subject to replay-buffer capacity).
 	TypeResume byte = 0x0d
 
+	// TypeKindStats (0x0e) is the periodic per-Kind observability
+	// report from subscriber back to publisher. Payload is JSON
+	// KindStats{Kind, LastSeq, RecvP50Ms, RecvP99Ms, Dropped}. Sent
+	// at ~1 Hz when the "kind-stats" feature is negotiated. Lets the
+	// publisher see the true end-to-end p99 per lane without
+	// guessing from send-side queue depth alone.
+	TypeKindStats byte = 0x0e
+
 	// Feed-frame range (0x20..0x2F): media-bearing AUs on uni feed
 	// streams, plus stream-scoped envelopes.
 	//   0x20 TypeKeyframe       — GOP-start frame

@@ -1,6 +1,6 @@
 # Troubleshooting Guide
 
-This guide covers common issues, debugging techniques, and solutions for quicrtc deployments.
+Common issues, debugging techniques, and solutions for quicrtc deployments.
 
 ## Connection Issues
 
@@ -368,8 +368,6 @@ Buffer is full. Check:
 - Need more aggressive drop policy
 
 ## Getting Help
-
-If you're still stuck:
 
 1. **Check the logs**
    - Server logs for connection errors

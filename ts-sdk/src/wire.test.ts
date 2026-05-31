@@ -22,6 +22,7 @@ import {
   marshalAnnounce,
   marshalBackpressure,
   marshalHello,
+  marshalKindStats,
   marshalResume,
   marshalSDP,
   marshalUnannounce,
@@ -30,7 +31,9 @@ import {
   readFeedFrame,
   unmarshalAnnounce,
   unmarshalBackpressure,
+  unmarshalError,
   unmarshalHello,
+  unmarshalKindStats,
   unmarshalResume,
   unmarshalSDP,
   unmarshalUnannounce,
@@ -43,6 +46,7 @@ import {
   Backpressure,
   FrameType,
   Hello,
+  KindStats,
   Resume,
   SDP,
   Unannounce,
@@ -482,6 +486,45 @@ async function run() {
     if (got[0] !== 0 || got[1] !== 1) {
       throw new Error(`unread aliased caller buffer: got [${got[0]}, ${got[1]}], want [0, 1]`);
     }
+  });
+
+  await test('marshalKindStats / unmarshalKindStats round-trip', async () => {
+    const ks: KindStats = {
+      kind: 'tokens',
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      last_seq: 4242,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      recv_p50_ms: 38,
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      recv_p99_ms: 71,
+      dropped: 3,
+    };
+    const round = unmarshalKindStats(marshalKindStats(ks));
+    assertEqual(round.kind, 'tokens', 'kind');
+    assertEqual(round.last_seq, 4242, 'last_seq');
+    assertEqual(round.recv_p50_ms, 38, 'recv_p50_ms');
+    assertEqual(round.recv_p99_ms, 71, 'recv_p99_ms');
+    assertEqual(round.dropped ?? 0, 3, 'dropped');
+  });
+
+  await test('unmarshalError parses JSON envelope', async () => {
+    const json = new TextEncoder().encode(JSON.stringify({ code: 'track_unauthorized', reason: 'tenant mismatch' }));
+    const ep = unmarshalError(json);
+    assertEqual(ep.code, 'track_unauthorized', 'code');
+    assertEqual(ep.reason ?? '', 'tenant mismatch', 'reason');
+  });
+
+  await test('unmarshalError falls back to plain bytes (legacy)', async () => {
+    const legacy = new TextEncoder().encode('auth');
+    const ep = unmarshalError(legacy);
+    assertEqual(ep.code, '', 'legacy code is empty');
+    assertEqual(ep.reason ?? '', 'auth', 'legacy reason carries the bytes');
+  });
+
+  await test('unmarshalError handles empty payload', async () => {
+    const ep = unmarshalError(new Uint8Array(0));
+    assertEqual(ep.code, '', 'empty code');
+    assertEqual(ep.reason ?? '', '', 'empty reason');
   });
 
   console.log('\n=== Summary ===');

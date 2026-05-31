@@ -1,6 +1,6 @@
 // Package server is the high-level quicrtc HTTP/3 + WebTransport
 // listener. It binds the wire/feed/session/cert pieces together and
-// exposes a simple Publisher handle for the consumer's encoder loop.
+// exposes a Publisher handle for the consumer's encoder loop.
 //
 // One server = one publisher, many subscribers. For multi-upstream
 // fan-out (one server aggregating from N publishers, or relay
@@ -153,6 +153,75 @@ type Config struct {
 	// unlimited (default; safe for closed deployments).
 	InboundRateLimit session.RateLimit
 
+	// OnAnnounce, if non-nil, gates inbound TypeAnnounce frames from
+	// subscribers: the multi-tenant per-track auth hook. Called with
+	// the authenticated tenant scope (from AuthValidator), the session
+	// ID, the announced track name, and its kind. Returning a non-nil
+	// error rejects the announce: the server emits a TypeError with
+	// wire.ErrorPayload{Code: "track_unauthorized"} and does NOT
+	// allocate the inbound track. Uni streams that name a rejected
+	// or unannounced track are also dropped at stream-header time.
+	//
+	// Without this set, all subscriber-side PublishBack announces are
+	// accepted (legacy behavior; safe for single-tenant deployments).
+	OnAnnounce func(tenant, sessionID, trackName, kind string) error
+
+	// InstanceID identifies this server in a multi-instance deployment.
+	// Used by DistributedSessionStore implementations to disambiguate
+	// instances. Empty = auto-generated 128-bit base64url string at
+	// New() time, suitable for single-instance deployments where the
+	// value is opaque.
+	InstanceID string
+
+	// InstanceAddr is the externally-reachable URL of this server,
+	// used by the pre-Upgrade routing handler when redirecting resume
+	// requests to the instance currently holding a parked session.
+	// Example: "https://agent-1.us-east.example.com:4433". Empty
+	// disables cross-instance redirects (single-instance deployments
+	// don't need it).
+	InstanceAddr string
+
+	// EvictionInterval is how often the server walks its SessionStore
+	// for expired parked entries. <=0 picks 30s. Only meaningful when
+	// the store implements EvictableStore. Stores that rely on
+	// backend TTLs (e.g. Redis) implement neither, and the loop never
+	// runs for them.
+	EvictionInterval time.Duration
+
+	// OnKindStats, if non-nil, receives subscriber-emitted KindStats
+	// observability frames. Forwarded to session.Config.OnKindStats;
+	// see that field for semantics. Active only when the client
+	// advertises the "kind-stats" feature.
+	OnKindStats func(sessionID string, stats wire.KindStats)
+
+	// PriorityScheduler selects WHEN the per-session priority scheduler
+	// runs. The scheduler serializes the session's per-track pump writes
+	// through one worker that picks the highest-priority pump with an AU
+	// ready, so latency-sensitive lanes (tokens, tool calls) drain ahead
+	// of bulk video; large bulk frames are written in chunks so they
+	// yield the worker between chunks rather than holding it for the
+	// whole frame (see feed.Pump pacing). The cost is a Submit/Wait
+	// roundtrip per AU — pure overhead on a session with nothing to
+	// reorder.
+	//
+	//	SchedulerAuto (default): the library decides. Today that is OFF —
+	//	  the scheduler only earns its per-AU cost under real bandwidth
+	//	  contention, which isn't detectable at setup time yet. Reserved
+	//	  for a contention-aware enable.
+	//	SchedulerOn / SchedulerOff: force the choice. Turn On for a
+	//	  session you know mixes a latency-sensitive lane with a sustained
+	//	  bulk lane over a contended link.
+	//
+	// Semantics are application-level Submit-ordering, not RFC 9218
+	// byte-level interleaving (quic-go exposes no PRIORITY_UPDATE).
+	PriorityScheduler SchedulerMode
+
+	// UsePriorityScheduler is the deprecated boolean form of
+	// PriorityScheduler: true is equivalent to SchedulerOn. Honored only
+	// when PriorityScheduler is left at its SchedulerAuto zero value.
+	// Prefer PriorityScheduler.
+	UsePriorityScheduler bool
+
 	// SupportedFeatures is the optional protocol features this server
 	// offers. Intersected with the client's HELLO.Features and echoed
 	// in SDP.Features. nil = use the defaults (all features the
@@ -178,6 +247,42 @@ func DefaultSupportedFeatures() []string {
 		"backpressure",  // TypeBackpressure subscriber→publisher
 		"publishback",   // subscriber-side AddTrack
 		"stream-header", // TypeStreamHeader on uni feed streams
+		"kind-stats",    // TypeKindStats per-Kind observability
+	}
+}
+
+// SchedulerMode selects when a session's priority scheduler runs. See
+// Config.PriorityScheduler.
+type SchedulerMode uint8
+
+const (
+	// SchedulerAuto lets the library decide. Today that means OFF: the
+	// scheduler is per-AU Submit/Wait overhead that only earns its cost
+	// under real bandwidth contention, and "mixed priorities" turned out
+	// to be a poor proxy for contention — auto-enabling on it regressed
+	// the loopback computer-use benchmark's tail (pure overhead, no
+	// contention to resolve). Reserved for a future contention-aware
+	// enable. Zero value.
+	SchedulerAuto SchedulerMode = iota
+	// SchedulerOn always runs the scheduler. Use it for a session you
+	// know mixes a latency-sensitive lane (tokens, tool calls) with a
+	// sustained bulk lane (video) over a contended link.
+	SchedulerOn
+	// SchedulerOff never runs the scheduler.
+	SchedulerOff
+)
+
+// schedulerEnabled reports whether this server should run a per-session
+// priority scheduler, honoring PriorityScheduler and the deprecated
+// UsePriorityScheduler bool.
+func (s *Server) schedulerEnabled() bool {
+	switch s.cfg.PriorityScheduler {
+	case SchedulerOn:
+		return true
+	case SchedulerOff:
+		return false
+	default: // SchedulerAuto — opt-in until a contention-aware enable lands.
+		return s.cfg.UsePriorityScheduler
 	}
 }
 
@@ -209,6 +314,27 @@ type Server struct {
 	// returns 503 to new clients so they can pick a different
 	// instance (or retry after the drain completes).
 	draining atomic.Bool
+
+	// instanceID identifies this server to a DistributedSessionStore
+	// so cross-instance lookups can disambiguate the local node.
+	// Auto-generated in New if Config.InstanceID was empty.
+	instanceID string
+
+	// recorderMu guards the recorder registry. Recorders attach an
+	// interceptor to every track's broadcaster — both existing tracks
+	// at attach time and tracks added later via addTrackInternal.
+	recorderMu sync.Mutex
+	recorders  []recorderEntry
+}
+
+// recorderEntry pairs a Recorder with its per-track detach functions
+// so DetachRecorder can remove every interceptor it installed.
+type recorderEntry struct {
+	rec interface {
+		Write(trackName, kind string, au pubsub.AccessUnit) error
+		Close() error
+	}
+	detachers map[string]func()
 }
 
 // trackEntry is one published track on this server.
@@ -350,16 +476,25 @@ func New(cfg Config) (*Server, error) {
 	if store == nil {
 		store = NewMemorySessionStore(cfg.Session.ResumeWindow)
 	}
+	instanceID := cfg.InstanceID
+	if instanceID == "" {
+		var raw [16]byte
+		if _, err := rand.Read(raw[:]); err != nil {
+			return nil, fmt.Errorf("instance id: %w", err)
+		}
+		instanceID = base64.RawURLEncoding.EncodeToString(raw[:])
+	}
 	s := &Server{
-		cfg:      cfg,
-		metrics:  m,
-		logger:   logger,
-		bundle:   bundle,
-		slug:     slug,
-		host:     host,
-		tracks:   make(map[string]*trackEntry),
-		sessions: make(map[*sessionRef]struct{}),
-		store:    store,
+		cfg:        cfg,
+		metrics:    m,
+		logger:     logger,
+		bundle:     bundle,
+		slug:       slug,
+		host:       host,
+		tracks:     make(map[string]*trackEntry),
+		sessions:   make(map[*sessionRef]struct{}),
+		store:      store,
+		instanceID: instanceID,
 	}
 	// "primary" exists by default to preserve single-track API
 	// callers that grab Publisher() without ever calling AddTrack.
@@ -367,8 +502,8 @@ func New(cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// TrackSpec is the modern entry point for AddTrack. All fields except
-// Name are optional; zero values pick safe defaults (KindVideo at
+// TrackSpec describes a track for AddTrackSpec. All fields except
+// Name are optional; zero values pick defaults (KindVideo at
 // priority 4 with no trackID). The Kind field is what unlocks the
 // per-kind delivery dispatch in feed.Pump — without it, the track
 // falls through to the legacy stream-per-GOP path regardless of
@@ -466,6 +601,20 @@ func (s *Server) addTrackInternal(name string, kind track.Kind, priority uint8, 
 	for r := range s.sessions {
 		refs = append(refs, r)
 	}
+	// Attach any registered recorders to this new track while trackMu
+	// is still held. Doing this outside the lock opens a race where a
+	// concurrent AttachRecorder sees the new track (post-publish),
+	// registers an interceptor, then this path registers ANOTHER
+	// interceptor for the same recorder/track once AttachRecorder
+	// appends its entry to s.recorders. Holding trackMu through
+	// attachRecordersToTrack serializes the two paths: either the
+	// recorder is in s.recorders before the track is published (this
+	// call attaches), or AttachRecorder runs after trackMu is released
+	// (it walks s.tracks under trackMu and sees the new track once).
+	// recorderMu and bc.interceptorsMu are independent locks; lock
+	// order is trackMu -> recorderMu -> interceptorsMu, never the
+	// reverse, so no deadlock with concurrent broadcaster ops.
+	s.attachRecordersToTrack(name, string(kind), bc)
 	s.trackMu.Unlock()
 	for _, r := range refs {
 		// Prefer the most-specific attach function the session
@@ -529,6 +678,84 @@ func (s *Server) RemoveTrack(name string) {
 	t.bc.Close()
 	s.metrics.TrackRemoved(name)
 	s.logger.Debug("quicrtc/server: track removed", "name", name)
+}
+
+// AttachRecorder wires a Recorder-shaped sink to every track's
+// broadcaster as an interceptor. Recorders attached this way also
+// auto-attach to tracks added later via AddTrack and AddTrackSpec.
+//
+// The returned detach function removes every interceptor this call
+// installed AND stops the auto-attach for future tracks. Idempotent.
+//
+// The sink interface is structurally compatible with record.Recorder
+// but kept local so the server package doesn't import record/.
+func (s *Server) AttachRecorder(rec interface {
+	Write(trackName, kind string, au pubsub.AccessUnit) error
+	Close() error
+}) (detach func()) {
+	entry := recorderEntry{rec: rec, detachers: make(map[string]func())}
+
+	// Atomic registration: take BOTH trackMu and recorderMu before
+	// modifying either. The lock order here (trackMu -> recorderMu)
+	// matches addTrackInternal's order, so the two paths serialize
+	// against each other. Without this, a window between unlocking
+	// trackMu and locking recorderMu lets an interleaved
+	// addTrackInternal either (a) publish a new track that this
+	// recorder never gets attached to, or (b) double-attach an
+	// interceptor for the same recorder/track pair.
+	s.trackMu.Lock()
+	s.recorderMu.Lock()
+	s.recorders = append(s.recorders, entry)
+	idx := len(s.recorders) - 1
+	for name, t := range s.tracks {
+		kind := string(t.kind)
+		bc := t.bc
+		rmv := bc.AddInterceptor(func(au pubsub.AccessUnit) (pubsub.AccessUnit, error) {
+			_ = rec.Write(name, kind, au)
+			return au, nil
+		})
+		entry.detachers[name] = rmv
+	}
+	s.recorderMu.Unlock()
+	s.trackMu.Unlock()
+
+	var detachOnce sync.Once
+	return func() {
+		detachOnce.Do(func() {
+			s.recorderMu.Lock()
+			// Lift the entry out by zero-ing the slot rather than
+			// re-indexing — concurrent attach/detach pairs stay stable.
+			if idx < len(s.recorders) {
+				detachers := s.recorders[idx].detachers
+				s.recorders[idx] = recorderEntry{}
+				s.recorderMu.Unlock()
+				for _, fn := range detachers {
+					fn()
+				}
+				return
+			}
+			s.recorderMu.Unlock()
+		})
+	}
+}
+
+// attachRecordersToTrack runs every registered recorder against a
+// newly-added track. Called from addTrackInternal after the
+// broadcaster is constructed but before any subscriber is attached.
+func (s *Server) attachRecordersToTrack(name, kind string, bc *pubsub.Broadcaster) {
+	s.recorderMu.Lock()
+	defer s.recorderMu.Unlock()
+	for i := range s.recorders {
+		if s.recorders[i].rec == nil {
+			continue
+		}
+		rec := s.recorders[i].rec
+		rmv := bc.AddInterceptor(func(au pubsub.AccessUnit) (pubsub.AccessUnit, error) {
+			_ = rec.Write(name, kind, au)
+			return au, nil
+		})
+		s.recorders[i].detachers[name] = rmv
+	}
 }
 
 // Publisher returns the default ("primary") Publisher handle. Kept
@@ -725,6 +952,29 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 			http.Error(w, "too many sessions", http.StatusServiceUnavailable)
 			return
 		}
+		// Pre-Upgrade routing: when the store is distributed and the
+		// client is resuming, ask the store which instance currently
+		// holds the parked receivers. If it's a different instance,
+		// return a 307 redirect. This MUST happen before wts.Upgrade
+		// because the upgrade hijacks the response.
+		//
+		// The HELLO on the upgraded session is still required to
+		// match the query session ID; the redirect is only a hint,
+		// not an authorization step.
+		if sessID := r.URL.Query().Get("session"); sessID != "" {
+			if d, ok := s.store.(DistributedSessionStore); ok && s.cfg.InstanceAddr != "" {
+				tenant := r.Header.Get("X-QuicRTC-Tenant")
+				if addr, found := d.LookupInstance(tenant, sessID); found && addr != s.cfg.InstanceAddr {
+					target := addr + r.URL.Path
+					if r.URL.RawQuery != "" {
+						target += "?" + r.URL.RawQuery
+					}
+					// #nosec G710 -- redirect host is the trusted InstanceAddr from the session store; only this request's own path/query are appended, so the authority can't be hijacked.
+					http.Redirect(w, r, target, http.StatusTemporaryRedirect)
+					return
+				}
+			}
+		}
 		wtSess, err := wts.Upgrade(w, r)
 		if err != nil {
 			return
@@ -768,6 +1018,37 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		_ = wts.Close()
 		_ = udpConn.Close()
 	}()
+
+	// Background eviction loop. Runs only when the store implements
+	// EvictableStore. Remote stores (Redis, etc.) typically lean on
+	// backend TTLs and don't need this; the memory store does
+	// implement it.
+	if e, ok := s.store.(EvictableStore); ok {
+		interval := s.cfg.EvictionInterval
+		if interval <= 0 {
+			interval = 30 * time.Second
+		}
+		go func() {
+			tick := time.NewTicker(interval)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					e.EvictExpired(time.Now())
+				}
+			}
+		}()
+	}
+
+	// Register this instance with the distributed store so resume
+	// requests landing on other instances can find us.
+	if d, ok := s.store.(DistributedSessionStore); ok && s.cfg.InstanceAddr != "" {
+		if err := d.RegisterInstance(ctx, s.instanceID, s.cfg.InstanceAddr); err != nil {
+			s.logger.Warn("quicrtc/server: distributed-store RegisterInstance failed", "err", err)
+		}
+	}
 
 	// Use wts.Serve, NOT h3.Serve — the webtransport.Server wires up
 	// its own per-connection session manager during Serve, and
@@ -878,6 +1159,8 @@ func (s *Server) runSession(parent context.Context, wt *webtransport.Session) {
 	cfg.OnDataChannel = s.cfg.OnDataChannel
 	cfg.OnBackpressure = s.cfg.OnBackpressure
 	cfg.OnKeyframeRequest = s.cfg.OnKeyframeRequest
+	cfg.OnAnnounce = s.cfg.OnAnnounce
+	cfg.OnKindStats = s.cfg.OnKindStats
 	cfg.InboundRateLimit = s.cfg.InboundRateLimit
 	if s.cfg.SupportedFeatures != nil {
 		cfg.SupportedFeatures = s.cfg.SupportedFeatures
@@ -890,6 +1173,22 @@ func (s *Server) runSession(parent context.Context, wt *webtransport.Session) {
 	// per-Kind pumps fall back to stream-per-GOP (see feed/pump.go:Run).
 	cfg.FeedConfig.DatagramSender = &wtDatagramSender{wt: wt}
 	cfg.FeedConfig.BidiOpener = &wtBidiOpener{wt: wt}
+	// FallbackOpener handles oversize / send-failed datagram AUs by
+	// spilling onto a persistent uni stream. Same uniOpener as the
+	// stream-based tracks; the fallback stream carries its own
+	// TypeStreamHeader so the receiver demuxes correctly.
+	uo := &uniOpener{wt: wt}
+	cfg.FeedConfig.FallbackOpener = uo
+
+	// Optional priority scheduler: one per session, shared by every
+	// per-track pump. Closed when this session goroutine returns so
+	// no goroutine leaks even on abrupt disconnect.
+	if s.schedulerEnabled() {
+		sched := feed.NewScheduler()
+		sched.Start(ctx)
+		defer sched.Close()
+		cfg.FeedConfig.Scheduler = sched
+	}
 
 	// Fire OnSession only after the session has authenticated — see
 	// the Config.OnSession contract. The callback runs synchronously
@@ -900,7 +1199,7 @@ func (s *Server) runSession(parent context.Context, wt *webtransport.Session) {
 		}
 	}
 
-	sess := session.New(cfg, ctl, &uniOpener{wt: wt})
+	sess := session.New(cfg, ctl, uo)
 	sess.OnAllocateID = s.store.AllocateID
 	sess.OnResume = func(tenant, id string, lastSeen map[string]uint32) (map[string]*pubsub.Receiver, bool) {
 		recvs := s.store.Resume(tenant, id)

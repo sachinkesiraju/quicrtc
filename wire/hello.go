@@ -36,7 +36,9 @@ import "encoding/json"
 type Hello struct {
 	Role        string            `json:"role"`                // "recv" (subscriber) | "send" (publisher, future)
 	Slug        string            `json:"slug"`                // shared secret from the share link
-	Version     string            `json:"ver"`                 // wire-format version
+	Version     string            `json:"ver"`                 // preferred wire-format version
+	MinVersion  string            `json:"min_ver,omitempty"`   // minimum wire version the client accepts; empty = same as Version
+	MaxVersion  string            `json:"max_ver,omitempty"`   // maximum wire version the client supports; empty = same as Version
 	SessionID   string            `json:"session,omitempty"`   // resume an existing session
 	Features    []string          `json:"features,omitempty"`  // declared client capabilities
 	LastSeenSeq map[string]uint32 `json:"last_seen,omitempty"` // per-track resume cursor
@@ -56,18 +58,71 @@ type Hello struct {
 // should treat features outside this list as unsupported even if
 // they had advertised them in HELLO.
 type SDP struct {
-	Codec     string   `json:"codec"` // e.g. "avc1.42E01F"
-	Width     int      `json:"width"`
-	Height    int      `json:"height"`
-	FPS       int      `json:"fps"`
-	ScreenW   float64  `json:"screenW,omitempty"` // optional sender display dims
-	ScreenH   float64  `json:"screenH,omitempty"`
-	SessionID string   `json:"session,omitempty"`  // assigned/echoed session ID
-	Features  []string `json:"features,omitempty"` // negotiated feature subset
+	Codec             string   `json:"codec"` // e.g. "avc1.42E01F"
+	Width             int      `json:"width"`
+	Height            int      `json:"height"`
+	FPS               int      `json:"fps"`
+	ScreenW           float64  `json:"screenW,omitempty"` // optional sender display dims
+	ScreenH           float64  `json:"screenH,omitempty"`
+	SessionID         string   `json:"session,omitempty"`  // assigned/echoed session ID
+	Features          []string `json:"features,omitempty"` // negotiated feature subset
+	NegotiatedVersion string   `json:"neg_ver,omitempty"`  // wire-format version both peers agreed on; empty = same as legacy Version field implies
 }
 
 // CurrentVersion is the wire-format version this build emits.
 const CurrentVersion = "1"
+
+// MinSupportedVersion is the oldest wire-format version this build can
+// still speak. Equal to CurrentVersion when there's no legacy support
+// to maintain. Bumped only when an older version is dropped from the
+// build.
+const MinSupportedVersion = "1"
+
+// NegotiateVersion picks the highest version both peers can speak, or
+// returns ("", false) if the offered ranges don't overlap.
+//
+// Each side declares a [min, max] inclusive range. The chosen version
+// is min(clientMax, serverMax), the newest version both peers can
+// speak. Negotiation succeeds iff that value is >= max(clientMin,
+// serverMin).
+//
+// Empty min/max are treated as equal to the peer's preferred version
+// (the legacy single-version field). This preserves the v0.1 wire
+// behavior where only Version was sent.
+func NegotiateVersion(clientMin, clientMax, serverMin, serverMax string) (string, bool) {
+	lo := clientMin
+	if cmpVersion(serverMin, lo) > 0 {
+		lo = serverMin
+	}
+	hi := clientMax
+	if cmpVersion(serverMax, hi) < 0 {
+		hi = serverMax
+	}
+	if cmpVersion(hi, lo) < 0 {
+		return "", false
+	}
+	return hi, true
+}
+
+// cmpVersion lexicographically compares two version strings as decimal
+// integers. The wire format uses single-digit major versions today; the
+// implementation accepts multi-digit by length-then-byte ordering so a
+// future "10" sorts after "9".
+func cmpVersion(a, b string) int {
+	if len(a) != len(b) {
+		if len(a) < len(b) {
+			return -1
+		}
+		return 1
+	}
+	if a < b {
+		return -1
+	}
+	if a > b {
+		return 1
+	}
+	return 0
+}
 
 // Announce is the payload of a TypeAnnounce control frame. Either side
 // of an established session sends one to declare a track they intend
@@ -124,12 +179,49 @@ type Backpressure struct {
 	NeedsKeyframe bool   `json:"needs_keyframe,omitempty"`
 }
 
+// KindStats is the payload of a TypeKindStats control frame, sent
+// periodically (typically ~1 Hz) from subscriber to publisher when
+// the "kind-stats" feature is negotiated. Reports the end-to-end
+// receive-side state per track kind so the publisher can compute
+// true p99 latency without guessing from local queue depth alone.
+//
+// LastSeq is the most recent AU sequence number observed on any
+// track of this Kind. RecvP50Ms and RecvP99Ms are receive-side
+// percentiles (publish wall-clock → recv wall-clock) approximated
+// from the subscriber's running histogram. Dropped is the cumulative
+// count of AUs the subscriber dropped due to local backpressure for
+// this Kind.
+type KindStats struct {
+	Kind      string `json:"kind"`
+	LastSeq   uint32 `json:"last_seq"`
+	RecvP50Ms uint32 `json:"recv_p50_ms"`
+	RecvP99Ms uint32 `json:"recv_p99_ms"`
+	Dropped   uint64 `json:"dropped,omitempty"`
+}
+
+// ErrorPayload is the structured envelope for a TypeError control
+// frame. Code is a short machine-readable identifier (e.g. "auth",
+// "version", "track_unauthorized") that clients can dispatch on
+// without parsing free-form text. Reason is human-readable.
+//
+// Back-compat: legacy peers wrote plain bytes into TypeError payloads
+// (e.g. []byte("auth")). Clients that receive a non-JSON payload
+// should fall back to treating the bytes as Reason with Code="".
+// Servers that wish to remain compatible with very old clients can
+// continue to write plain bytes; new servers SHOULD emit JSON.
+type ErrorPayload struct {
+	Code   string `json:"code"`
+	Reason string `json:"reason,omitempty"`
+}
+
 func (h Hello) Marshal() ([]byte, error)        { return json.Marshal(h) }
 func (s SDP) Marshal() ([]byte, error)          { return json.Marshal(s) }
 func (a Announce) Marshal() ([]byte, error)     { return json.Marshal(a) }
 func (u Unannounce) Marshal() ([]byte, error)   { return json.Marshal(u) }
 func (r Resume) Marshal() ([]byte, error)       { return json.Marshal(r) }
 func (b Backpressure) Marshal() ([]byte, error) { return json.Marshal(b) }
+func (e ErrorPayload) Marshal() ([]byte, error) { return json.Marshal(e) }
+func (k KindStats) Marshal() ([]byte, error)    { return json.Marshal(k) }
 
 func UnmarshalHello(b []byte) (Hello, error) {
 	var h Hello
@@ -165,4 +257,31 @@ func UnmarshalBackpressure(b []byte) (Backpressure, error) {
 	var bp Backpressure
 	err := json.Unmarshal(b, &bp)
 	return bp, err
+}
+
+// UnmarshalKindStats parses a TypeKindStats payload.
+func UnmarshalKindStats(b []byte) (KindStats, error) {
+	var k KindStats
+	err := json.Unmarshal(b, &k)
+	return k, err
+}
+
+// UnmarshalError parses a TypeError payload. JSON payloads round-trip
+// into ErrorPayload. Legacy plain-bytes payloads (no JSON brace) are
+// returned as ErrorPayload{Reason: string(b)} so callers always get a
+// usable struct.
+func UnmarshalError(b []byte) (ErrorPayload, error) {
+	if len(b) == 0 {
+		return ErrorPayload{}, nil
+	}
+	// Detect JSON: a structured payload always starts with '{'. Plain
+	// bytes from legacy senders are surfaced as Reason without code.
+	if b[0] != '{' {
+		return ErrorPayload{Reason: string(b)}, nil
+	}
+	var e ErrorPayload
+	if err := json.Unmarshal(b, &e); err != nil {
+		return ErrorPayload{Reason: string(b)}, err
+	}
+	return e, nil
 }

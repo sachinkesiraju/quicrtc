@@ -96,14 +96,43 @@ type Config struct {
 	TrackName string
 
 	// Priority is the track-level priority hint (RFC 9218 numeric
-	// scale: lower = more urgent). This value is currently
-	// observability-only — quic-go does not yet expose
-	// PRIORITY_UPDATE on the public API surface, so we cannot
-	// influence the underlying QUIC stream scheduling. When upstream
-	// support lands we'll plumb this through SetPriority on each
-	// stream-open. For now: emitted via OnStreamOpened so observers
-	// can verify intent matches arrival order.
+	// scale: lower = more urgent). When Scheduler is set, this value
+	// orders this pump's AU writes against other pumps sharing the
+	// same Scheduler: higher-priority pumps drain first when both
+	// have AUs ready. quic-go does not expose PRIORITY_UPDATE on its
+	// public API, so byte-level interleaving inside the QUIC connection
+	// is still kernel-of-truth FIFO; we only influence application-
+	// level ordering at the Submit-to-write boundary. When upstream
+	// support lands we will plumb this into SetPriority on each
+	// stream-open and the Submit gate becomes redundant. Until then
+	// the Scheduler path is the only way to give one track jump-ahead
+	// behavior under contention. The hint is always emitted via
+	// OnStreamOpened so observers can verify intent matches arrival
+	// order even when no Scheduler is wired.
 	Priority uint8
+
+	// Scheduler, when non-nil, serializes this pump's AU writes
+	// through a shared priority queue so cross-track ordering follows
+	// Priority instead of goroutine scheduling. Multiple pumps in the
+	// same session typically share one Scheduler.
+	//
+	// Precise semantic: each pump submits one AU at a time and waits
+	// for the scheduler to run it before reading the next AU off its
+	// receiver channel. When N pumps share a Scheduler and each has
+	// at least one AU pending, the scheduler's worker picks the
+	// highest-priority item. Under sustained contention this gives
+	// "every available slot goes to the highest-priority pump that
+	// has an item queued in the scheduler when the worker is free,"
+	// NOT "all of high's items before any of low's." A pump that
+	// could submit-ahead would give batched priority. The per-AU-wait
+	// design intentionally trades that for back-pressure simplicity:
+	// a slow downstream cannot fill the scheduler queue past one
+	// item per pump.
+	//
+	// Optional; when nil, each pump writes directly without
+	// coordination (the legacy path, lowest overhead, no cross-pump
+	// priority influence).
+	Scheduler *Scheduler
 
 	// OnStreamOpened is called after each successful uni stream
 	// open with the track name + priority hint. Optional; useful for
@@ -130,6 +159,23 @@ type Config struct {
 	// The high-level server wraps webtransport.Session.SendDatagram
 	// into this interface so the pump stays testable.
 	DatagramSender DatagramSender
+
+	// FallbackOpener is used by the DeliveryDatagramOrStream pump when
+	// an AU cannot ride the datagram path (payload exceeds the QUIC
+	// path MTU, or SendDatagram returns an error). When set, the pump
+	// lazily opens a single persistent uni stream and writes the
+	// affected AU there using the self-contained feed-frame format.
+	// When unset, those AUs are dropped and surfaced via OnAUDropped
+	// with reason "datagram_too_large" or "send_failed". The high-level
+	// server wires the same StreamOpener it uses for stream-based tracks.
+	FallbackOpener StreamOpener
+
+	// OnFallback is invoked when an AU was routed through the fallback
+	// stream rather than the datagram path. reason is the original
+	// datagram-path failure ("datagram_too_large" or "send_failed").
+	// Optional; useful for observability that wants to count fallback
+	// activations without conflating them with hard drops.
+	OnFallback func(reason string)
 
 	// TrackID is the session-scoped 1-byte handle for datagram tracks.
 	// Used as the envelope's track-id byte so the receiver can demux
@@ -178,6 +224,49 @@ type Pump struct {
 	// bidiInFlight tracks concurrent in-flight BidiPerCall calls.
 	// Exposed via BidiInFlight() for tests/observability.
 	bidiInFlight int64
+
+	// Receiver pointer is set when Run starts so Stats() can read
+	// QueueDepth without re-plumbing through every call site. Read
+	// via atomic.Pointer.Load: only the goroutine running Run writes
+	// it; observers may concurrently Load.
+	recv atomic.Pointer[pubsub.Receiver]
+
+	// oldestAUMicros is wall-clock UnixMicro of the head AU currently
+	// being processed by the pump. Zero when idle. Updated when the
+	// pump picks an AU off the channel; cleared when that AU is
+	// successfully written or dropped.
+	oldestAUMicros int64
+}
+
+// PumpStats reports the pump's current view of its outbound queue.
+// Fields are best-effort snapshots: readers should not rely on
+// strict per-AU consistency, only on order-of-magnitude correctness
+// for observability.
+type PumpStats struct {
+	QueueDepth  int           // approximate AUs waiting in the receiver channel
+	OldestAUAge time.Duration // wall-clock age of the oldest queued AU, or 0 if idle
+}
+
+// Stats returns a point-in-time snapshot of pump observability.
+// Cheap (Receiver.QueueDepth is one len(chan); atomic loads
+// otherwise); safe to call from any goroutine.
+func (p *Pump) Stats() PumpStats {
+	var depth int
+	if r := p.recv.Load(); r != nil {
+		depth = r.QueueDepth()
+	}
+	oldest := atomic.LoadInt64(&p.oldestAUMicros)
+	var age time.Duration
+	if oldest > 0 {
+		age = time.Duration(time.Now().UnixMicro()-oldest) * time.Microsecond
+		if age < 0 {
+			age = 0
+		}
+	}
+	return PumpStats{
+		QueueDepth:  depth,
+		OldestAUAge: age,
+	}
 }
 
 // BidiInFlight returns the current count of in-flight BidiPerCall
@@ -208,6 +297,8 @@ func New(opener StreamOpener, cfg Config) *Pump {
 // not wired, so telemetry/tool-call tracks still deliver reliably on
 // transports that don't support those primitives.
 func (p *Pump) Run(ctx context.Context, recv *pubsub.Receiver) error {
+	p.recv.Store(recv)
+	defer p.recv.Store(nil)
 	switch p.cfg.Delivery {
 	case track.DeliveryStreamLowLatency:
 		return p.runStreamLowLatency(ctx, recv)
@@ -224,6 +315,42 @@ func (p *Pump) Run(ctx context.Context, recv *pubsub.Receiver) error {
 	default:
 		return p.runStreamGOP(ctx, recv)
 	}
+}
+
+// scheduledDo runs fn either inline (no Scheduler) or via the shared
+// Scheduler's priority queue (Scheduler set). When scheduled, the
+// caller blocks until fn returns. This serializes writes across all
+// pumps sharing the Scheduler: lower-priority pumps yield to
+// higher-priority ones at AU granularity.
+//
+// Done is allocated per call. The throughput cost is one channel
+// send + receive per AU on top of the existing write, measurable
+// but small relative to a stream.Write on a real network. Sessions
+// that don't need priority gating leave Scheduler unset and pay
+// nothing.
+func (p *Pump) scheduledDo(fn func()) {
+	if p.cfg.Scheduler == nil {
+		fn()
+		return
+	}
+	done := make(chan struct{})
+	ok := p.cfg.Scheduler.Submit(WorkItem{
+		Priority: p.cfg.Priority,
+		// defer close so a panic inside fn still releases the wait
+		// rather than leaking the pump goroutine.
+		Do: func() {
+			defer close(done)
+			fn()
+		},
+	})
+	if !ok {
+		// Scheduler is closed (the session is shutting down). Run
+		// inline so the pump can observe its own ctx-cancel and exit
+		// instead of blocking forever on a done that will never fire.
+		fn()
+		return
+	}
+	<-done
 }
 
 // runStreamGOP is the legacy per-GOP pump: one uni stream per
@@ -302,8 +429,8 @@ func (p *Pump) runStreamGOP(ctx context.Context, recv *pubsub.Receiver) error {
 			flags |= wire.FlagDiscontinuity
 		}
 
-		_ = current.SetWriteDeadline(time.Now().Add(p.cfg.WriteDeadline))
-		if err := writeFeedFramePooled(current, typ, au.PTSMicro, au.Seq, flags, au.Bytes); err != nil {
+		writeErr := p.writeFrame(current, typ, au.PTSMicro, au.Seq, flags, au.Bytes)
+		if writeErr != nil {
 			current.CancelWrite(0)
 			current = nil
 			recv.RequestKeyframe()
@@ -422,8 +549,8 @@ func (p *Pump) runStreamLowLatency(ctx context.Context, recv *pubsub.Receiver) e
 			flags |= wire.FlagDiscontinuity
 		}
 
-		_ = stream.SetWriteDeadline(time.Now().Add(p.cfg.WriteDeadline))
-		if err := writeFeedFramePooled(stream, wire.TypeKeyframe, au.PTSMicro, au.Seq, flags, au.Bytes); err != nil {
+		writeErr := p.writeFrame(stream, wire.TypeKeyframe, au.PTSMicro, au.Seq, flags, au.Bytes)
+		if writeErr != nil {
 			// Write failed — could be a transient deadline elapse or
 			// the stream genuinely dying. Distinguish would require
 			// inspecting err; for now treat it as "drop AU, reopen on
@@ -441,32 +568,27 @@ func (p *Pump) runStreamLowLatency(ctx context.Context, recv *pubsub.Receiver) e
 	}
 }
 
-// writeFeedFramePooled is a pooled-buffer variant of wire.WriteFeedFrame
-// that avoids the per-call allocation in the hot path AND coalesces the
-// header + payload into a single stream.Write so quic-go can pack into
-// one QUIC packet without extra coalescing logic. Used by both
-// runStreamGOP (typ = TypeKeyframe or TypePFrame) and runStreamLowLatency
-// (typ = TypeKeyframe; every AU is self-contained).
-func writeFeedFramePooled(w io.Writer, typ byte, pts uint64, seq uint32, flags byte, payload []byte) error {
-	// Reject oversize payloads before encoding. The 3-byte length field
-	// caps at MaxFeedPayload; silently truncating would desync the wire.
-	if len(payload) > wire.MaxFeedPayload {
-		return fmt.Errorf("%w: feed %d > %d", wire.ErrFrameTooLarge, len(payload), wire.MaxFeedPayload)
-	}
-	bufp := lowLatencyBufPool.Get().(*[]byte)
-	buf := (*bufp)[:0]
-	defer func() {
-		*bufp = buf[:0]
-		lowLatencyBufPool.Put(bufp)
-	}()
+// pacingChunkBytes bounds how many bytes one scheduled write puts on the
+// wire before yielding the shared scheduler worker back to other pumps.
+// Only relevant when a Scheduler is set: a large bulk frame (a video
+// keyframe is often hundreds of KiB) is written in chunks so a higher-
+// priority pump's small AU — an LLM token, a tool call — runs between
+// chunks instead of waiting out the whole frame. Chunk boundaries are
+// invisible on the wire: the receiver reassembles by the frame's length
+// prefix. 16 KiB keeps the yield granularity fine without adding many
+// extra Write calls (a 256 KiB frame becomes 16 chunks).
+const pacingChunkBytes = 16 * 1024
 
-	// Inline encode of the feed frame to one contiguous buffer:
-	//   [1B type][3B BE length][8B BE pts][4B BE seq][1B flags][payload]
-	// length is just len(payload) — the wire format puts the
-	// fixed-size feed metadata between the length and the payload, so
-	// this matches wire.WriteFeedFrame exactly.
+// appendFeedFrame encodes one feed frame onto dst and returns the grown
+// slice:
+//
+//	[1B type][3B BE length][8B BE pts][4B BE seq][1B flags][payload]
+//
+// length is len(payload) — the fixed-size feed metadata sits between the
+// length and the payload, matching wire.WriteFeedFrame exactly.
+func appendFeedFrame(dst []byte, typ byte, pts uint64, seq uint32, flags byte, payload []byte) []byte {
 	n := len(payload)
-	buf = append(buf,
+	dst = append(dst,
 		typ,
 		byte(n>>16), byte(n>>8), byte(n),
 		byte(pts>>56), byte(pts>>48), byte(pts>>40), byte(pts>>32),
@@ -474,7 +596,67 @@ func writeFeedFramePooled(w io.Writer, typ byte, pts uint64, seq uint32, flags b
 		byte(seq>>24), byte(seq>>16), byte(seq>>8), byte(seq),
 		flags,
 	)
-	buf = append(buf, payload...)
+	return append(dst, payload...)
+}
+
+// writeFeedFramePooled encodes and writes one feed frame in a single
+// stream.Write (header + payload coalesced so quic-go can pack one
+// packet), using a pooled scratch buffer to avoid a per-call allocation.
+// Used by the non-scheduler / small-frame path in writeFrame.
+func writeFeedFramePooled(w io.Writer, typ byte, pts uint64, seq uint32, flags byte, payload []byte) error {
+	// Reject oversize payloads before encoding. The 3-byte length field
+	// caps at MaxFeedPayload; silently truncating would desync the wire.
+	if len(payload) > wire.MaxFeedPayload {
+		return fmt.Errorf("%w: feed %d > %d", wire.ErrFrameTooLarge, len(payload), wire.MaxFeedPayload)
+	}
+	bufp := lowLatencyBufPool.Get().(*[]byte)
+	buf := appendFeedFrame((*bufp)[:0], typ, pts, seq, flags, payload)
+	defer func() {
+		*bufp = buf[:0]
+		lowLatencyBufPool.Put(bufp)
+	}()
 	_, err := w.Write(buf)
+	return err
+}
+
+// writeFrame writes one feed frame to w through the pump's scheduling
+// discipline. Without a Scheduler — or for a small frame — it is a
+// single coalesced, deadline-guarded write, identical to the legacy
+// path. With a Scheduler AND a large frame it writes in pacingChunkBytes
+// chunks, each submitted to the scheduler, so a higher-priority pump's AU
+// preempts between chunks instead of waiting out the whole frame. The
+// same pump writes its own chunks sequentially (scheduledDo blocks until
+// each runs), so a frame's bytes stay contiguous and in order on its
+// stream; only OTHER pumps' work — on OTHER streams — interleaves.
+func (p *Pump) writeFrame(w SendStream, typ byte, pts uint64, seq uint32, flags byte, payload []byte) error {
+	if len(payload) > wire.MaxFeedPayload {
+		return fmt.Errorf("%w: feed %d > %d", wire.ErrFrameTooLarge, len(payload), wire.MaxFeedPayload)
+	}
+	if p.cfg.Scheduler == nil || wire.FeedHeaderLen+len(payload) <= pacingChunkBytes {
+		var err error
+		p.scheduledDo(func() {
+			_ = w.SetWriteDeadline(time.Now().Add(p.cfg.WriteDeadline))
+			err = writeFeedFramePooled(w, typ, pts, seq, flags, payload)
+		})
+		return err
+	}
+	// Large frame under a scheduler: chunked cooperative write.
+	bufp := lowLatencyBufPool.Get().(*[]byte)
+	buf := appendFeedFrame((*bufp)[:0], typ, pts, seq, flags, payload)
+	defer func() {
+		*bufp = buf[:0]
+		lowLatencyBufPool.Put(bufp)
+	}()
+	var err error
+	for off := 0; off < len(buf) && err == nil; off += pacingChunkBytes {
+		end := min(off+pacingChunkBytes, len(buf))
+		chunk := buf[off:end]
+		p.scheduledDo(func() {
+			_ = w.SetWriteDeadline(time.Now().Add(p.cfg.WriteDeadline))
+			if _, werr := w.Write(chunk); werr != nil {
+				err = werr
+			}
+		})
+	}
 	return err
 }

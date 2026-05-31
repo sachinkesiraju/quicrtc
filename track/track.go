@@ -134,8 +134,17 @@ func DefaultPriority(k Kind) Priority {
 	switch k {
 	case KindAudio:
 		return PriorityCritical
-	case KindVideo, KindTokens, KindToolCalls:
+	case KindTokens, KindToolCalls:
+		// Latency-sensitive small lanes: tokens gate TTFT, tool calls
+		// gate continued generation. Ranked above bulk video so the
+		// priority scheduler lets them slip between video frames instead
+		// of queueing behind a screen burst — the "tokens don't stall
+		// behind video" guarantee, made real at the scheduling layer.
 		return PriorityHigh
+	case KindVideo:
+		// Bulk lane: important, but not the lane that must jump the
+		// queue. Below tokens/tool-calls, above background telemetry.
+		return PriorityNormal
 	case KindTelemetry:
 		return PriorityBackground
 	default:

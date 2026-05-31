@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>quicrtc · session replay</title>
+<style>
+  :root{
+    --bg:#f5f6f8; --card:#ffffff; --line:#e6e8ec; --line-soft:#eef0f3;
+    --txt:#1c2230; --mut:#6b7280; --faint:#9aa3ae;
+    --screen:#2f6fed; --tokens:#15a34a; --tools:#e08a1e; --tele:#64748b;
+    --accent:#e11d48; --gold:#eab308;
+    --shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.05);
+    --radius:12px;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--txt);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  #app{max-width:1320px;margin:0 auto;padding:26px}
+  header{margin-bottom:14px}
+  h1{margin:0;font-size:18px;font-weight:650;letter-spacing:-.01em}
+  h1 .muted{color:var(--faint);font-weight:500}
+  header .sub{color:var(--mut);font-size:13px;margin-top:5px;max-width:880px}
+  #tl{width:100%;height:200px;background:var(--card);border:1px solid var(--line);
+    border-radius:var(--radius);box-shadow:var(--shadow);cursor:ew-resize;display:block}
+  #ctrls{display:flex;align-items:center;gap:16px;margin:16px 2px 4px}
+  #play{background:var(--card);color:var(--txt);border:1px solid var(--line);border-radius:9px;
+    padding:7px 15px;cursor:pointer;font-size:13.5px;font-weight:550;box-shadow:var(--shadow)}
+  #play:hover{background:#fbfbfc;border-color:#d6dae1}
+  #scrub{flex:1;height:5px;-webkit-appearance:none;appearance:none;background:#e3e6ea;border-radius:999px;outline:none}
+  #scrub::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;border-radius:50%;
+    background:var(--card);border:2.5px solid var(--accent);box-shadow:var(--shadow);cursor:pointer;margin-top:0}
+  #scrub::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:var(--card);border:2.5px solid var(--accent);cursor:pointer}
+  #time{font-variant-numeric:tabular-nums;color:var(--mut);min-width:94px;text-align:right;font-size:13px}
+  #panels{display:grid;grid-template-columns:1.25fr 1fr 1fr;gap:16px;margin-top:12px}
+  .panel{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:15px 17px;min-height:258px;box-shadow:var(--shadow)}
+  .panel h2{margin:0 0 11px;font-size:11px;letter-spacing:.07em;text-transform:uppercase;
+    color:var(--faint);font-weight:650;display:flex;gap:8px;align-items:center}
+  .panel h2 .what{color:var(--mut);font-weight:550;text-transform:none;letter-spacing:0}
+  .dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none}
+  #screenImg{width:100%;border-radius:8px;border:1px solid var(--line);background:#fff;display:block}
+  #reasoning{font-size:13.5px;color:#3a4150}
+  #reasoning .tok{color:#9aa3ae}
+  #reasoning .tok.cur{color:var(--txt);background:#dcf5e5;border-radius:4px;padding:1px 4px}
+  .call{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;padding:7px 9px;border-radius:7px;
+    border:1px solid var(--line-soft);margin-bottom:7px;color:var(--mut);word-break:break-all;background:#fbfbfc}
+  .call.cur{color:var(--txt);border-color:#f0c98a;background:#fdf6ea}
+  #tele .g{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--line-soft)}
+  #tele .g:last-child{border-bottom:none}
+  #tele .g span{color:var(--mut)}
+  #tele .g b{font-variant-numeric:tabular-nums;font-weight:600}
+  #drop{display:none;color:var(--mut);margin-top:14px}
+  code{background:#f0f1f4;border:1px solid var(--line);border-radius:5px;padding:1px 5px;font-size:12px}
+  footer{margin-top:18px;padding:15px 17px;background:#fbfcfd;border:1px solid var(--line);border-radius:var(--radius);
+    color:var(--mut);font-size:12.5px;line-height:1.65;box-shadow:var(--shadow)}
+  footer strong{color:var(--txt)} footer em{font-style:normal;color:var(--txt);font-weight:600}
+  footer .row{display:flex;gap:10px} footer .row + .row{margin-top:9px;padding-top:9px;border-top:1px solid var(--line-soft)}
+  footer .tag{flex:none;width:78px;color:var(--faint);font-weight:650;text-transform:uppercase;font-size:10.5px;letter-spacing:.06em;padding-top:1px}
+  #modebar{display:flex;align-items:center;gap:12px;margin:2px 2px 12px;flex-wrap:wrap}
+  #modebar .ml{color:var(--mut);font-size:12.5px}
+  .seg{display:inline-flex;background:#eceef1;border:1px solid var(--line);border-radius:9px;padding:2px}
+  .seg .opt{border:0;background:transparent;color:var(--mut);font:550 12.5px/1 inherit;padding:7px 13px;border-radius:7px;cursor:pointer}
+  .seg .opt.active{background:var(--card);color:var(--txt);box-shadow:var(--shadow)}
+  .skew{font-size:12px;font-weight:600;font-variant-numeric:tabular-nums;padding:4px 11px;border-radius:999px;border:1px solid var(--line)}
+  .skew.ok{color:#15803d;background:#ecfdf3;border-color:#bbf7d0}
+  .skew.bad{color:#b42318;background:#fef3f2;border-color:#fecdca}
+  .modenote{color:var(--faint);font-size:11.5px}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>quicrtc <span class="muted">·</span> session replay</h1>
+    <div class="sub">Scrub a recorded agent session with the timeline, slider, or play. Each lane shows what the agent
+    <b>saw</b> (screen), <b>reasoned</b> (tokens), and <b>did</b> (tool calls) at that instant — reconstructed from one capture clock.</div>
+  </header>
+  <div id="modebar">
+    <span class="ml">reconstruct as</span>
+    <div class="seg" id="seg">
+      <button class="opt active" data-mode="quic">quicrtc · 1 clock</button>
+      <button class="opt" data-mode="glued">glued stack · 4 clocks</button>
+    </div>
+    <span id="skew" class="skew ok">cross-lane skew ≈ 0 ms · exact</span>
+    <span id="modenote" class="modenote">every lane shares one capture clock; nothing is delayed</span>
+  </div>
+  <canvas id="tl"></canvas>
+  <div id="ctrls">
+    <button id="play">▶ play</button>
+    <input id="scrub" type="range" min="0" max="1000" value="300">
+    <div id="time">t = 0 ms</div>
+  </div>
+  <div id="panels">
+    <div class="panel"><h2><span class="dot" style="background:var(--screen)"></span>screen <span class="what">· what it saw</span></h2><img id="screenImg" alt="screen frame"></div>
+    <div class="panel"><h2><span class="dot" style="background:var(--tokens)"></span>reasoning <span class="what">· what it said</span></h2><div id="reasoning"></div></div>
+    <div class="panel">
+      <h2><span class="dot" style="background:var(--tools)"></span>tool calls <span class="what">· what it did</span></h2><div id="tools"></div>
+      <h2 style="margin-top:16px"><span class="dot" style="background:var(--tele)"></span>telemetry</h2><div id="tele"></div>
+    </div>
+  </div>
+  <p id="drop">Couldn't load <code>bundle.json</code>. Serve this folder (<code>python3 -m http.server</code>) and open it over http://, or drag a <code>bundle.json</code> onto the page.</p>
+  <footer>
+    <div class="row"><span class="tag">Why quicrtc</span><div>All four lanes ride <em>one</em> QUIC connection on <em>one</em> capture clock, so this frame-aligned replay is exact and essentially free. Reconstruct the same view from a glued WebRTC&nbsp;+&nbsp;SSE&nbsp;+&nbsp;gRPC&nbsp;+&nbsp;OTLP stack and you're correlating four clocks across four connections.</div></div>
+    <div class="row"><span class="tag">Try it</span><div>Flip the toggle to <em>glued stack · 4 clocks</em>: replayed as four independent connections, each lane arrives later by its own latency (illustrative) — the dots slide right by different amounts, the lanes drift apart, and the slowest lane drags the session's end <em>past</em> where quicrtc finished. You can no longer say what the agent saw at the instant it clicked. quicrtc's single connection + clock keeps every lane frame-exact and the session shortest. This page shows the <em>observability</em> payoff.</div></div>
+  </footer>
+</div>
+<script src="scrubber.js"></script>
+</body>
+</html>

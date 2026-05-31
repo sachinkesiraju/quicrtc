@@ -1,8 +1,7 @@
 # ts-sdk/examples
 
-Browser examples for the `quicrtc` package. There's one example right now,
-and it's deliberately the *only* example because it covers the full
-SDK surface:
+Browser examples for the `quicrtc` package. One example, which covers the
+full SDK surface:
 
 ## viewer — universal browser viewer
 
@@ -24,6 +23,6 @@ Error` and a backpressure indicator that lights up when the SDK fires
 screen AUs until level returns to 0).
 
 One viewer, many servers — point it at any Go example under
-examples and the right panels light up.
+examples.
 
 See viewer/README.md for setup + run instructions.

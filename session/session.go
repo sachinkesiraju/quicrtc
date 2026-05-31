@@ -154,6 +154,32 @@ type Config struct {
 	// the peer has authenticated. The callback runs on the session
 	// goroutine; long-running work should spawn its own goroutine.
 	OnHandshakeComplete func(s *Session)
+
+	// OnAnnounce, if non-nil, gates inbound TypeAnnounce frames from
+	// the subscriber. Called BEFORE the inbound track is allocated.
+	// Returning a non-nil error rejects the announce: the server sends
+	// a TypeError frame carrying a wire.ErrorPayload{Code:
+	// "track_unauthorized"} and the track is not registered. Without
+	// OnAnnounce set, all announces are accepted (legacy behavior).
+	//
+	// Use this to gate multi-tenant PublishBack: a subscriber
+	// authenticated as tenant A should not be allowed to publish on a
+	// track namespace owned by tenant B. The race between the
+	// subscriber's Announce and a uni stream naming the same track is
+	// closed at stream-header time. When OnAnnounce is set, a stream
+	// naming a not-yet-announced (or rejected) track is dropped before
+	// any AU is delivered to the inbound queue.
+	OnAnnounce func(tenant, sessionID, trackName, kind string) error
+
+	// OnKindStats, if non-nil, is invoked whenever the subscriber
+	// emits a TypeKindStats observability frame. Fires only when the
+	// "kind-stats" feature was negotiated in HELLO; older clients
+	// don't emit and the callback never runs.
+	//
+	// Applications use this to learn the true end-to-end p99 per
+	// Kind without guessing from local queue depth alone, and to
+	// drive SLO-aware adaptation (a v1.x+ feature on top of this).
+	OnKindStats func(sessionID string, stats wire.KindStats)
 }
 
 // ErrAuth is returned when the subscriber's HELLO slug doesn't match.
@@ -206,6 +232,11 @@ type Session struct {
 	// handshake completes. Both peers should treat features outside
 	// this list as unsupported.
 	NegotiatedFeatures []string
+
+	// NegotiatedVersion is the wire-format version both peers agreed
+	// on at HELLO time. Equal to wire.CurrentVersion in single-version
+	// deployments. Populated after handshake completes.
+	NegotiatedVersion string
 
 	// Tenant is the auth-scoped tenant identifier for this session,
 	// returned by AuthValidator. Empty for single-tenant deployments.
@@ -310,6 +341,12 @@ type inboundTrack struct {
 	codec     string
 	ch        chan pubsub.AccessUnit
 	announced bool
+	// authorized indicates the Announce passed the OnAnnounce validator
+	// (or no validator is configured, in which case it's true by
+	// default). The uni-stream demuxer gates AU delivery on this when
+	// OnAnnounce is set, closing the race where a uni stream arrives
+	// for a track before the corresponding Announce frame.
+	authorized bool
 	// done is closed by handleUnannounce. Senders in drainInboundStream
 	// and readers in InboundRecv both select on it, so unannouncing a
 	// track in flight is race-free: closing t.ch directly would panic
@@ -712,10 +749,31 @@ func (s *Session) handshake(ctx context.Context) error {
 		s.bestEffortError([]byte("bad hello json"))
 		return fmt.Errorf("%w: %v", ErrBadHello, err)
 	}
-	if hello.Version != "" && hello.Version != wire.CurrentVersion {
-		s.bestEffortError([]byte("version"))
-		return fmt.Errorf("%w: ver %q", ErrBadHello, hello.Version)
+	// Wire-format version negotiation. Clients that send only the
+	// legacy Version field (no min/max) are treated as min=max=Version
+	// (the same single-version semantics v0.1 used). Clients that
+	// send min/max can negotiate a range.
+	clientMin := hello.MinVersion
+	if clientMin == "" {
+		clientMin = hello.Version
 	}
+	clientMax := hello.MaxVersion
+	if clientMax == "" {
+		clientMax = hello.Version
+	}
+	// Empty Version + empty min/max from a very old client: fall back
+	// to CurrentVersion (the legacy hello.Version == "" pass-through).
+	if clientMin == "" && clientMax == "" {
+		clientMin = wire.CurrentVersion
+		clientMax = wire.CurrentVersion
+	}
+	negotiated, ok := wire.NegotiateVersion(clientMin, clientMax, wire.MinSupportedVersion, wire.CurrentVersion)
+	if !ok {
+		s.bestEffortError([]byte("version"))
+		return fmt.Errorf("%w: client offered %s-%s, server %s-%s",
+			ErrBadHello, clientMin, clientMax, wire.MinSupportedVersion, wire.CurrentVersion)
+	}
+	s.NegotiatedVersion = negotiated
 	// Auth: prefer the pluggable validator when set; otherwise fall
 	// back to constant-time slug comparison.
 	if s.cfg.AuthValidator != nil {
@@ -782,6 +840,7 @@ func (s *Session) handshake(ctx context.Context) error {
 	// and echo in SDP.Features. Both peers MUST treat features outside
 	// the intersection as unsupported.
 	sdpVal.Features = intersectFeatures(hello.Features, s.cfg.SupportedFeatures)
+	sdpVal.NegotiatedVersion = s.NegotiatedVersion
 	s.NegotiatedFeatures = sdpVal.Features
 	sdp, err := sdpVal.Marshal()
 	if err != nil {
@@ -841,7 +900,18 @@ func (s *Session) controlReader(ctx context.Context) error {
 		case wire.TypeClose:
 			return nil
 		case wire.TypeError:
-			return fmt.Errorf("peer error: %s", string(payload))
+			// New (v1.0.2+) peers send JSON ErrorPayload{code, reason};
+			// legacy peers send plain bytes. wire.UnmarshalError handles
+			// both, surfacing legacy bytes as Reason. Format the result
+			// readably instead of dumping raw JSON into the error string.
+			ep, _ := wire.UnmarshalError(payload)
+			if ep.Code != "" && ep.Reason != "" {
+				return fmt.Errorf("peer error: %s: %s", ep.Code, ep.Reason)
+			}
+			if ep.Code != "" {
+				return fmt.Errorf("peer error: %s", ep.Code)
+			}
+			return fmt.Errorf("peer error: %s", ep.Reason)
 		case wire.TypeData:
 			s.dc.Deliver(payload)
 		case wire.TypeAnnounce:
@@ -853,6 +923,12 @@ func (s *Session) controlReader(ctx context.Context) error {
 			u, err := wire.UnmarshalUnannounce(payload)
 			if err == nil {
 				s.handleUnannounce(u)
+			}
+		case wire.TypeKindStats:
+			if s.cfg.OnKindStats != nil {
+				if ks, err := wire.UnmarshalKindStats(payload); err == nil {
+					s.cfg.OnKindStats(s.SessionID, ks)
+				}
 			}
 		case wire.TypeBackpressure:
 			bp, err := wire.UnmarshalBackpressure(payload)
@@ -880,12 +956,41 @@ func (s *Session) controlReader(ctx context.Context) error {
 // track on this session. The inbound track entry is created (or
 // updated) so subsequent uni-stream AUs route correctly even if they
 // arrive before the demuxer has seen the announce.
+//
+// When Config.OnAnnounce is set, it's invoked before the track is
+// marked authorized. Rejected announces emit a TypeError carrying a
+// wire.ErrorPayload{Code: "track_unauthorized"} and leave the track
+// unauthorized. Subsequent uni streams for that track are dropped
+// at stream-header time by drainInboundStream.
 func (s *Session) handleAnnounce(a wire.Announce) {
+	if s.cfg.OnAnnounce != nil {
+		if err := s.cfg.OnAnnounce(s.Tenant, s.SessionID, a.Name, a.Kind); err != nil {
+			payload, mErr := wire.ErrorPayload{
+				Code:   "track_unauthorized",
+				Reason: err.Error(),
+			}.Marshal()
+			if mErr == nil {
+				_ = s.writer.Write(wire.TypeError, payload)
+			}
+			// Record the announcement but leave it unauthorized so a
+			// retry would land in the same rejected state instead of
+			// silently accumulating attempts.
+			t := s.inboundTrackChan(a.Name)
+			s.inboundMu.Lock()
+			t.kind = a.Kind
+			t.codec = a.Codec
+			t.announced = true
+			t.authorized = false
+			s.inboundMu.Unlock()
+			return
+		}
+	}
 	t := s.inboundTrackChan(a.Name)
 	s.inboundMu.Lock()
 	t.kind = a.Kind
 	t.codec = a.Codec
 	t.announced = true
+	t.authorized = true
 	s.inboundMu.Unlock()
 }
 
@@ -936,6 +1041,20 @@ func (s *Session) drainInboundStream(ctx context.Context, stream UniStream) {
 	if trackName == "" {
 		trackName = "primary"
 		src = &peekedReader{first: firstByte, rest: stream}
+	}
+	// Stream-header-time auth gate: when OnAnnounce is configured the
+	// track must already be announced AND authorized, otherwise we
+	// drop the entire stream without creating an inbound queue. This
+	// closes the race where a uni stream for a not-yet-authorized
+	// track would otherwise enqueue AUs before handleAnnounce ran.
+	if s.cfg.OnAnnounce != nil {
+		s.inboundMu.Lock()
+		existing, ok := s.inboundTracks[trackName]
+		authorized := ok && existing.announced && existing.authorized
+		s.inboundMu.Unlock()
+		if !authorized {
+			return
+		}
 	}
 	t := s.inboundTrackChan(trackName)
 	for {

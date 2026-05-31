@@ -124,15 +124,16 @@ func (s *Scheduler) run(ctx context.Context) {
 	}
 }
 
-// Submit enqueues a WorkItem. Returns immediately — Do() runs later
-// on the worker goroutine. Non-blocking; if the scheduler is closed,
-// Submit silently drops the item (and increments a metric in
-// production code).
-func (s *Scheduler) Submit(item WorkItem) {
+// Submit enqueues a WorkItem and returns true. Returns false (without
+// enqueuing) if the scheduler is closed. Callers that synchronize on a
+// signal closed INSIDE Do (a per-call done chan, for example) MUST
+// release that signal themselves on the false branch, or they will
+// block forever waiting for a Do that will never run. Non-blocking.
+func (s *Scheduler) Submit(item WorkItem) bool {
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
-		return
+		return false
 	}
 	s.stats.Submitted.Add(1)
 	s.seq++
@@ -143,6 +144,7 @@ func (s *Scheduler) Submit(item WorkItem) {
 	})
 	s.cond.Signal()
 	s.mu.Unlock()
+	return true
 }
 
 // Close stops the scheduler. Items still in the queue at the moment

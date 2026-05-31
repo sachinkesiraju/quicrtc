@@ -333,6 +333,15 @@ func echoDOM(ctx context.Context, dom *qserver.Publisher, action []byte, seq uin
 	if len(action) >= 8 {
 		copy(payload[:8], action[:8])
 	}
+	// seq==1 is a keyframe so a fresh subscriber's receiver (which starts
+	// in need-keyframe state and would otherwise drop every DOM) begins
+	// delivering. The shared cu_dom broadcaster caches the latest keyframe
+	// and replays it to the next trial's subscriber, so trial N's client
+	// is first handed trial N-1's STALE DOM (action timestamp ~a trial
+	// old). The client discards any DOM stamped before the trial began
+	// (see runComputerUseQuicArm), so that replayed-stale-keyframe
+	// artifact — which was the entire bogus ~30s WAN "tail," not a
+	// transport stall — is no longer mis-measured.
 	_ = dom.Publish(ctx, pubsub.AccessUnit{
 		Bytes:    payload,
 		Keyframe: seq == 1,
@@ -621,15 +630,22 @@ func runComputerUseTest(info *serverInfo, serverHost string) {
 		rttStart, rttEnd, lossLabel())
 	sort.Float64s(allQuic)
 	sort.Float64s(allBase)
-	qp50, qp99, qmean := percentile(allQuic, 0.50), percentile(allQuic, 0.99), meanOf(allQuic)
-	bp50, bp99, bmean := percentile(allBase, 0.50), percentile(allBase, 0.99), meanOf(allBase)
-	fmt.Printf("quicrtc:  trials=%d actions=%d  p50=%.2f p99=%.2f mean=%.2f\n",
-		trials, len(allQuic), qp50, qp99, qmean)
-	fmt.Printf("baseline: trials=%d actions=%d  p50=%.2f p99=%.2f mean=%.2f\n",
-		trials, len(allBase), bp50, bp99, bmean)
+	// p99.9 and max are reported because the failure mode this bench
+	// exists to catch — a per-action stall that hangs for seconds — lives
+	// in the EXTREME tail, not at p99. A healthy run shows max within a
+	// few hundred ms of p99; a stuck action shows up as a multi-second
+	// max (the pre-fix run had a ~30s max from 2/3600 stalled actions).
+	qp50, qp99 := percentile(allQuic, 0.50), percentile(allQuic, 0.99)
+	qp999, qmax, qmean := percentile(allQuic, 0.999), maxOf(allQuic), meanOf(allQuic)
+	bp50, bp99 := percentile(allBase, 0.50), percentile(allBase, 0.99)
+	bp999, bmax, bmean := percentile(allBase, 0.999), maxOf(allBase), meanOf(allBase)
+	fmt.Printf("quicrtc:  trials=%d actions=%d  p50=%.2f p99=%.2f p99.9=%.2f max=%.2f mean=%.2f\n",
+		trials, len(allQuic), qp50, qp99, qp999, qmax, qmean)
+	fmt.Printf("baseline: trials=%d actions=%d  p50=%.2f p99=%.2f p99.9=%.2f max=%.2f mean=%.2f\n",
+		trials, len(allBase), bp50, bp99, bp999, bmax, bmean)
 	if qp50 > 0 && qp99 > 0 {
-		fmt.Printf("ratio (baseline/quicrtc): p50 = %.2fx, p99 = %.2fx\n",
-			bp50/qp50, bp99/qp99)
+		fmt.Printf("ratio (baseline/quicrtc): p50 = %.2fx, p99 = %.2fx, max = %.2fx\n",
+			bp50/qp50, bp99/qp99, safeRatio(bmax, qmax))
 	} else {
 		fmt.Println("ratio (baseline/quicrtc): n/a (zero samples on at least one arm)")
 	}
@@ -712,6 +728,11 @@ func runComputerUseQuicArm(info *serverInfo, trial int, trialSec int, screenMbps
 
 	var wg sync.WaitGroup
 
+	// trialStart marks when this trial's live workload begins; the dom
+	// drain uses it to discard the shared broadcaster's stale replayed
+	// keyframe (stamped before this trial).
+	trialStart := time.Now()
+
 	// Drain screen — sanity, not measured.
 	wg.Add(1)
 	go func() {
@@ -758,16 +779,27 @@ func runComputerUseQuicArm(info *serverInfo, trial int, trialSec int, screenMbps
 			}
 			now := time.Now()
 			sentAt := decodeTS(au.Bytes)
-			if !sentAt.IsZero() {
-				mu.Lock()
-				samples = append(samples, cuSample{
-					Protocol: "quicrtc",
-					Trial:    trial,
-					Index:    count,
-					RTTms:    float64(now.Sub(sentAt).Microseconds()) / 1000.0,
-				})
-				mu.Unlock()
+			if sentAt.IsZero() {
+				count++
+				continue
 			}
+			// Discard a DOM stamped before this trial began: it's the
+			// shared broadcaster replaying the PREVIOUS trial's cached
+			// keyframe to this fresh subscriber, not a live echo. This is
+			// what produced the bogus ~30s "stall." It does not count
+			// toward the measured actions, so a full set of live samples
+			// is still collected.
+			if sentAt.Before(trialStart) {
+				continue
+			}
+			mu.Lock()
+			samples = append(samples, cuSample{
+				Protocol: "quicrtc",
+				Trial:    trial,
+				Index:    count,
+				RTTms:    float64(now.Sub(sentAt).Microseconds()) / 1000.0,
+			})
+			mu.Unlock()
 			count++
 		}
 	}()
@@ -932,4 +964,23 @@ func meanOf(xs []float64) float64 {
 		sum += v
 	}
 	return sum / float64(len(xs))
+}
+
+func maxOf(xs []float64) float64 {
+	var m float64
+	for _, v := range xs {
+		if v > m {
+			m = v
+		}
+	}
+	return m
+}
+
+// safeRatio returns a/b, or 0 when b is 0 (avoids a divide-by-zero in the
+// max-ratio line when an arm recorded no samples).
+func safeRatio(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
 }

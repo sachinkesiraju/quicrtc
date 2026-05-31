@@ -1,6 +1,6 @@
 # Production Deployment Guide
 
-This guide covers deploying quicrtc in production environments, including resource requirements, scaling strategies, monitoring, and security considerations.
+Resource requirements, scaling, monitoring, and security for running quicrtc in production.
 
 ## Resource Requirements
 
@@ -23,12 +23,8 @@ On a typical modern server (4-8 cores, 16-32GB RAM):
 
 ### Capacity Planning Example
 
-For a server handling 100 concurrent subscribers with:
-- 1 video track @ 2 Mbps
-- 1 token track @ 200 tokens/sec
-- 1 telemetry track @ 10 Hz
+100 concurrent subscribers, each with 1 video track @ 2 Mbps + 1 token track @ 200 tok/s + 1 telemetry track @ 10 Hz:
 
-Estimated requirements:
 - **Memory**: 100-200 MB for connections + overhead
 - **CPU**: 10-50% utilization (depends on encoding/decoding)
 - **Network**: ~200 Mbps outbound (100 × 2 Mbps)
@@ -37,11 +33,7 @@ Estimated requirements:
 
 ### Stateless Design
 
-quicrtc sessions are stateful within a single server process. For horizontal scaling:
-
-1. **Load balancing**: Use layer 4 (UDP) load balancing with consistent hashing
-2. **Session affinity**: Once a session is established, it must stay on the same server
-3. **No shared state**: Each server instance is independent
+Sessions are stateful within a single process. For horizontal scaling: use layer 4 (UDP) load balancing with consistent hashing, keep each established session on the same server (affinity), and run each instance independently with no shared state.
 
 ### Load Balancer Configuration
 
@@ -66,13 +58,11 @@ stream {
 
 ### Relay for 1:N Fan-Out
 
-For large-scale broadcasts, use the native relay to distribute load:
+For large-scale broadcasts, the native relay offloads the origin publisher and distributes geographically:
 
 ```
 Publisher → Relay Server → Multiple Downstream Servers → Subscribers
 ```
-
-This reduces the load on the origin publisher and allows geographic distribution.
 
 ## TLS Certificate Management
 
@@ -123,18 +113,13 @@ srv, _ := server.New(server.Config{
 
 ### Certificate Rotation
 
-The `cert.Reloader` automatically picks up certificate changes without restart. For zero-downtime rotation:
-
-1. Update the certificate files on disk
-2. The reloader detects the change
-3. New connections use the new certificate
-4. Existing sessions continue on their original certificate
+`cert.Reloader` picks up certificate changes without a restart. For zero-downtime rotation, update the cert files on disk: the reloader detects the change, new connections use the new cert, and existing sessions continue on their original one.
 
 ## Rate Limiting and DoS Protection
 
 quicrtc exposes two integration points; per-IP throttling belongs upstream at the load balancer.
 
-### Per-session bandwidth — `Config.InboundRateLimit`
+### Per-session bandwidth: `Config.InboundRateLimit`
 
 Bounds inbound (PublishBack) traffic per session via a token bucket. Set this in production.
 
@@ -149,7 +134,7 @@ srv, _ := server.New(server.Config{
 })
 ```
 
-### Per-tenant admission cap — `Config.AuthValidator` + `Config.OnSession`
+### Per-tenant admission cap: `Config.AuthValidator` + `Config.OnSession`
 
 Validator runs per HELLO and can refuse before any data flows. Pair it with `OnSession` to decrement on disconnect via `SessionHandle.Context().Done()`:
 
@@ -181,7 +166,7 @@ srv, _ := server.New(server.Config{
 })
 ```
 
-### Per-IP throttling — at the LB
+### Per-IP throttling: at the LB
 
 quicrtc has no per-IP hook by design. Do this at your UDP load balancer (nginx stream, HAProxy, or a `net.PacketConn` wrapper).
 
@@ -192,13 +177,11 @@ quic-go provides built-in protections:
 - Stream limits per connection
 - Handshake timeout
 
-quicrtc currently ships with tuned defaults (receive windows 4/16 MiB per-stream, 8/32 MiB per-connection, datagrams enabled, partial-delivery on reset) and does not expose `quic.Config` for caller-side tuning. If you need to override `MaxIdleTimeout`, `KeepAlivePeriod`, or stream caps — for example for mobile sessions where the radio sleeps — file an issue and we'll add the hook.
+quicrtc currently ships with tuned defaults (receive windows 4/16 MiB per-stream, 8/32 MiB per-connection, datagrams enabled, partial-delivery on reset) and does not expose `quic.Config` for caller-side tuning. If you need to override `MaxIdleTimeout`, `KeepAlivePeriod`, or stream caps (for example, for mobile sessions where the radio sleeps), file an issue and we'll add the hook.
 
 ## Monitoring and Observability
 
 ### Key Metrics
-
-Monitor these metrics to understand system health:
 
 | Metric | Type | Question it answers |
 |--------|------|---------------------|
@@ -213,7 +196,7 @@ Monitor these metrics to understand system health:
 
 ### Prometheus Integration
 
-Implement the `metrics.Metrics` interface (13 methods — see `metrics/metrics.go`) as a Prometheus adapter:
+Implement the `metrics.Metrics` interface (13 methods; see `metrics/metrics.go`) as a Prometheus adapter:
 
 ```go
 type promMetrics struct {
@@ -251,7 +234,7 @@ srv, _ := server.New(server.Config{
 })
 ```
 
-quicrtc deliberately does not depend on `prometheus/client_golang` — keep the adapter in your application.
+quicrtc deliberately does not depend on `prometheus/client_golang`; keep the adapter in your application.
 
 ### Logging Best Practices
 
@@ -278,12 +261,7 @@ Set up alerts for:
 
 ### Authentication in Production
 
-Never use the auto-generated slug in production. Always use:
-
-1. **JWT validation**: Implement `AuthValidator` with proper JWT verification
-2. **Short-lived tokens**: Use JWTs with short expiration (5-15 minutes)
-3. **Token refresh**: Implement a refresh token mechanism
-4. **Tenant isolation**: Ensure `AuthValidator` returns non-empty tenant IDs
+Never use the auto-generated slug in production. Use `AuthValidator` with JWT verification, short-lived tokens (5-15 min expiry) plus a refresh mechanism, and return non-empty tenant IDs for isolation.
 
 ```go
 AuthValidator: func(credential string) (tenant string, err error) {
@@ -331,11 +309,9 @@ if err := srv.Shutdown(drainCtx); err != nil {
 }
 ```
 
-For readiness probes, poll `srv.IsDraining()` — return non-200 while draining so the LB stops routing new connections to this instance.
+For readiness probes, poll `srv.IsDraining()` and return non-200 while draining so the LB stops routing new connections to this instance.
 
 ### Health Checks
-
-Implement health check endpoints:
 
 ```go
 http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -345,7 +321,7 @@ http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 })
 ```
 
-### Multi-Instance Session Resume — `SessionStore`
+### Multi-Instance Session Resume: `SessionStore`
 
 `server.SessionStore` is the interface that holds parked session state across socket disconnects:
 
@@ -357,12 +333,51 @@ type SessionStore interface {
 }
 ```
 
-**Important caveat.** A parked session holds in-process `*pubsub.Receiver` channels into broadcasters. These cannot be serialized across processes. So a "shared" backend can hold session metadata (which instance owns the session, expiresAt) — but the actual replay path requires:
+**Important caveat.** A parked session holds in-process `*pubsub.Receiver` channels into broadcasters. These cannot be serialized across processes. So a "shared" backend can hold session metadata (which instance owns the session, expiresAt), but the actual replay path requires either:
 
-1. **Sticky LB routing** (recommended): reconnect goes back to the same instance that holds the receivers. Use the HELLO/SDP `SessionID` as the affinity key. Pair sticky routing with the default `NewMemorySessionStore()`.
-2. **Active session migration** (future): ship replay buffers + reattach to the broadcaster on the new instance. Not implemented today.
+1. **Sticky LB routing** (recommended where the LB supports it): reconnect goes back to the same instance that holds the receivers. Use the HELLO/SDP `SessionID` as the affinity key. Pair sticky routing with the default `NewMemorySessionStore()`. No additional configuration needed.
+2. **Pre-Upgrade redirect** (added in v1.0.2): instances behind a non-sticky LB cooperate via a `DistributedSessionStore` (e.g. Redis). On reconnect, the `/wt` handler reads the `?session=<id>` query param, asks the store which instance owns the session, and returns a `307 Temporary Redirect` to that instance's `InstanceAddr`. The redirect happens before `wts.Upgrade` hijacks the response; that hand-off is the only place an HTTP redirect can still be issued.
+3. **Active session migration** (future): ship replay buffers + reattach to the broadcaster on the new instance. Not implemented today.
 
-A shared store is useful for telling the LB which instance to route to; it does not let any instance serve any session.
+#### Pre-Upgrade redirect configuration
+
+Each instance declares its externally-reachable URL plus an
+instance ID. Plug a `DistributedSessionStore` implementation into
+`Config.SessionStore`; the handler will return 307 redirects to
+the instance owning each parked session.
+
+```go
+import "github.com/sachinkesiraju/quicrtc/server"
+
+// store implements server.SessionStore + server.DistributedSessionStore.
+// A Redis-backed reference implementation is on the roadmap as the
+// quicrtc-redis sibling repo; until that ships, write a thin adapter
+// against the interfaces in server/session_store.go.
+srv, _ := server.New(server.Config{
+    Addr:             ":4433",
+    SessionStore:     store,
+    InstanceID:       hostname,
+    InstanceAddr:     "https://agent-1.us-east.example.com:4433",
+    EvictionInterval: 30 * time.Second,
+    SDP:              sdp,
+})
+```
+
+The client appends `?session=<id>` to its reconnect URL; the
+redirect is transparent to the application code that calls
+`client.Dial`. Single-instance deployments don't need to do
+anything. Without a `DistributedSessionStore` plugged in, the
+redirect path is dormant and behavior matches v0.1.
+
+#### Background eviction loop
+
+When the configured store implements `EvictableStore` (the
+in-memory store does), the server runs a periodic sweep at
+`Config.EvictionInterval` (default 30 s). Idle servers reclaim
+parked sessions whose TTL elapsed without waiting for new
+traffic. Remote stores that lean on backend TTLs (Redis with `EX`,
+etcd leases) typically don't implement `EvictableStore`; the
+backend handles expiry, and the loop never runs for them.
 
 ## Deployment Patterns
 
@@ -457,7 +472,7 @@ See [`TROUBLESHOOTING.md`](TROUBLESHOOTING.md) for common production issues and 
 
 ### QUIC Configuration
 
-QUIC parameters are not currently tunable; quicrtc ships with defaults chosen for multi-modal AI workloads (receive windows 4/16 MiB per-stream, 8/32 MiB per-connection, datagrams enabled). If your workload needs `MaxIdleTimeout` / `KeepAlivePeriod` / stream-cap overrides — most common for long-lived mobile sessions — file an issue.
+QUIC parameters are not currently tunable; quicrtc ships with defaults chosen for multi-modal AI workloads (receive windows 4/16 MiB per-stream, 8/32 MiB per-connection, datagrams enabled). If your workload needs `MaxIdleTimeout` / `KeepAlivePeriod` / stream-cap overrides (most common for long-lived mobile sessions), file an issue.
 
 ### GOMAXPROCS
 

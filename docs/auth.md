@@ -2,21 +2,21 @@
 
 Two layers of subscriber authentication plus one mechanism for
 trusting the server's TLS certificate. None is a session-token
-system in the JWT sense — auth happens at the HELLO handshake; once
+system in the JWT sense: auth happens at the HELLO handshake; once
 the session is established, TLS provides confidentiality and
-integrity. This doc covers what each layer does, when to use which,
-and what they don't protect against.
+integrity.
 
 - [The handshake credential (slug)](#the-handshake-credential-slug)
 - [Single-tenant: shared slug](#single-tenant-shared-slug)
 - [Multi-tenant: AuthValidator + tenant scoping](#multi-tenant-authvalidator--tenant-scoping)
+- [Per-track authorization (PublishBack)](#per-track-authorization-publishback)
 - [Server identity: real CA cert vs. cert-hash TOFU](#server-identity-real-ca-cert-vs-cert-hash-tofu)
 - [Threat model](#threat-model)
 
 ## The handshake credential (slug)
 
 Every subscriber sends a HELLO frame as the first message on the
-control stream. HELLO carries a `slug` field — an opaque string
+control stream. HELLO carries a `slug` field, an opaque string
 the server inspects to decide whether to admit the session. The
 field is called "slug" for historical reasons; it can hold a
 shared secret, a JWT, an opaque bearer token, or anything else
@@ -37,8 +37,7 @@ If both are set, `AuthValidator` wins.
 
 ## Single-tenant: shared slug
 
-The simplest mode. The server holds one secret; every subscriber
-must echo it.
+The server holds one secret; every subscriber must echo it.
 
 ```go
 srv, _ := server.New(server.Config{
@@ -64,7 +63,7 @@ parses it from the URL fragment automatically:
 c, err := client.Dial(ctx, "https://host:4433/wt#slug=...&hash=...", client.Options{})
 ```
 
-The TypeScript client takes it the same way:
+The TypeScript client takes it the same way.
 
 ```typescript
 await client.connect('https://host:4433/wt', {
@@ -106,17 +105,17 @@ srv, _ := server.New(server.Config{
 ```
 
 The returned `tenant` string flows into the session as
-`session.Tenant` and — critically — **namespaces the session
-store**. Resume requests carrying a `SessionID` from tenant A
-cannot match a parked session belonging to tenant B; the lookup
-key is `(tenant, sessionID)`. This is the only cross-tenant
-isolation guarantee the library provides; everything else
-(billing, rate limiting, per-track ACLs) is the validator and
-application's responsibility.
+`session.Tenant` and **namespaces the session store**. Resume
+requests carrying a `SessionID` from tenant A cannot match a
+parked session belonging to tenant B; the lookup key is
+`(tenant, sessionID)`. This is the only cross-tenant isolation
+guarantee the library provides; everything else (billing, rate
+limiting, per-track ACLs) is the validator and application's
+responsibility.
 
 **The validator is on the handshake hot path.** It runs
 synchronously inside the per-connection goroutine, before any
-data flows. Keep it fast — JWT verification is fine, a database
+data flows. Keep it fast. JWT verification is fine; a database
 round-trip per HELLO is not. Cache aggressively (the JWT signing
 key, any per-tenant config) outside the callback.
 
@@ -131,6 +130,67 @@ isolated boundaries. Acceptable for single-tenant deployments
 that just want to validate JWTs centrally; never acceptable for
 multi-tenant.
 
+## Per-track authorization (PublishBack)
+
+`AuthValidator` decides who can open a session, not which tracks an
+authenticated subscriber may publish on once the session is open. In
+a single-tenant deployment every authenticated subscriber is trusted,
+so this is fine. In a multi-tenant SaaS it isn't: a subscriber
+authenticated as tenant A should not be able to call
+`client.AddTrack({Name: "tenantB/private"})` and land AUs in tenant
+B's namespace.
+
+`server.Config.OnAnnounce`, added in v1.0.2, is the hook that
+gates inbound `TypeAnnounce` frames per track:
+
+```go
+srv, _ := server.New(server.Config{
+    Addr:          ":443",
+    AuthValidator: validateJWT, // returns tenant
+    OnAnnounce: func(tenant, sessionID, trackName, kind string) error {
+        if !strings.HasPrefix(trackName, tenant+"/") {
+            return fmt.Errorf("track %q not under tenant %q", trackName, tenant)
+        }
+        return nil
+    },
+    SDP: sdp,
+})
+```
+
+Returning a non-nil error rejects the announce. The server emits
+a `TypeError` frame carrying a structured
+`wire.ErrorPayload{Code: "track_unauthorized", Reason: <err>}`
+payload (new in v1.0.2; the legacy plain-bytes payload format
+still decodes correctly on older clients via
+`wire.UnmarshalError`).
+
+The rejected track is recorded as `announced=true, authorized=false`
+in the session's inbound track set. A retry under the same name
+lands in the same rejected state, so a misbehaving client cannot
+accumulate Announce attempts to confuse server-side accounting.
+
+**Stream-header race fix.** A subscriber-opened uni stream
+carries a stream-header naming the track it publishes on
+(`wire.TypeStreamHeader`). Without per-track auth, the receiver
+queue is created lazily the first time the stream header (or the
+matching Announce) names a track. That opened a window where a
+subscriber could open the uni stream first, pump AUs into the queue,
+then send the Announce that `AuthValidator` would have rejected. With
+`OnAnnounce` set, the demuxer requires `announced=true &&
+authorized=true` before it creates the receive queue. Streams naming
+an unauthorized or not-yet-announced track are dropped at the header
+check; no AUs are enqueued and no inbound state is created.
+
+**The hook is on the control-frame hot path.** `handleAnnounce`
+runs from the session goroutine; long-running work (database
+lookups, RPCs) should run in a goroutine kicked off from the
+callback. The callback itself should be cache-driven.
+
+**Default behavior is unchanged when `OnAnnounce` is nil.** All
+announces are accepted, matching v0.1 single-tenant behavior. The
+stream-header gate is also a no-op in that case, so legacy
+PublishBack workloads keep working.
+
 ## Server identity: real CA cert vs. cert-hash TOFU
 
 The slug authenticates the *subscriber*. The TLS certificate
@@ -143,7 +203,7 @@ LAN, ephemeral certs).
 For a CA-issued cert (Let's Encrypt, internal PKI, your vendor of
 choice) point `Config.CertGetter` at a `*cert.Reloader`. The
 reloader watches the cert files on disk and picks up rotations
-without a server restart:
+without a server restart.
 
 ```go
 reloader, _ := cert.NewReloader("fullchain.pem", "privkey.pem", cert.ReloaderOptions{})
@@ -156,7 +216,7 @@ srv, _ := server.New(server.Config{
 ```
 
 Clients connect normally; the standard system CA pool validates
-the chain. No hash needed in the share link — omit the `#hash=`
+the chain. No hash needed in the share link; omit the `#hash=`
 fragment entirely.
 
 If you need to supply a static cert (no rotation), construct a
@@ -221,11 +281,11 @@ quicrtc auth is **not** designed for these:
   before exposing data.
 - **Replay protection beyond TLS.** TLS prevents on-path replay
   of frames. quicrtc does not prevent a leaked slug from being
-  used to open a *new* session — that's the JWT validator's job
+  used to open a *new* session; that's the JWT validator's job
   (use short-lived tokens, check `nbf`/`exp`, etc.).
 - **Audit logging.** The library emits an `AuthFailed` metric
   with a short reason; full audit logs (who connected, from
-  where, when) are the application's responsibility — wire them
+  where, when) are the application's responsibility. Wire them
   in via `OnSession` and your existing logging stack.
 
 ## Quick reference
@@ -238,7 +298,7 @@ quicrtc auth is **not** designed for these:
 | `server.Config.CertGetter` | server | Hot-reloadable TLS cert (e.g. cert-manager) |
 | `client.Options.Slug` | Go client | Credential to send in HELLO |
 | `client.Options.CertHashB64URL` | Go client | TOFU pin for self-signed certs |
-| `client.Options.InsecureSkipVerify` | Go client | Disables verification — **dev only** |
+| `client.Options.InsecureSkipVerify` | Go client | Disables verification (**dev only**) |
 | `Server.ShareLink()` | server | Returns `https://host/wt#slug=...&hash=...` |
 | `session.Session.Tenant` | runtime | Tenant scope returned by AuthValidator |
 | `metrics.Metrics.AuthFailed` | runtime | Per-failure counter for observability |

@@ -3,6 +3,15 @@
 A deterministic CUA-shaped workload that **measures** the per-Kind
 dispatch advantage instead of just claiming it.
 
+## What one turn looks like
+
+One "turn" of a computer-use agent over the wire. The page being driven runs on the server; the agent loop runs as the client.
+
+<p align="center"><img src="../../docs/assets/cua_flow.svg" alt="Inside a computer-use agent: the server hosts the page being driven and continuously sends fresh screenshots to the agent loop. Per turn, the agent sends four small requests — do an action, snapshot accessibility, snapshot DOM, snapshot perf — and the server runs all four in parallel. The action result comes back on a reliable lane (it includes a fresh screenshot); the three small inspections come back as fire-and-forget packets." width="880"></p>
+
+This example compares two ways the server can lay those messages out on the wire — see "What the comparison shows" below.
+
+
 > **What is real:** the wire, the per-Kind dispatch, the screen
 > stream (real PNG bytes), the measurement (real wall-time p50 /
 > p95 / max from real datagram round-trips).
@@ -78,14 +87,14 @@ turns=100 (5 warmup discarded, 95 measured)
 ```
 
 At default params on a healthy localhost the two modes look
-**essentially identical**. The reason is real: a clean 100+ Gbps
-loopback interface has so much bandwidth that 50 KB screen frames
-clear the wire in microseconds, the broadcaster channel never
-backs up, and the dispatch difference is below the noise floor.
+**essentially identical**. A clean 100+ Gbps loopback interface has so
+much bandwidth that 50 KB screen frames clear the wire in microseconds,
+the broadcaster channel never backs up, and the dispatch difference is
+below the noise floor.
 
-This isn't a flaw in the example — it's the honest answer for clean
-loopback conditions. To **see** the dispatch difference, run both
-modes with the `-stress` flag:
+This is the honest answer for clean loopback conditions, not a flaw in
+the example. To **see** the dispatch difference, run both modes with the
+`-stress` flag:
 
 ```bash
 go run ./examples/cua/server -mode=naive -stress
@@ -111,26 +120,24 @@ stress:
   per-turn max   12.3ms       8.4ms    -32%
 ```
 
-The datagram advantage (a11y/dom/perf) is **significant** because:
+The datagram advantage (a11y/dom/perf) comes from:
 - Metadata is tiny (< 200 bytes) and fits in one UDP packet
 - The 30 MB/s screen stream creates queueing on the single stream in naive mode
 - Multistream mode's dedicated streams + datagrams are unaffected by screen congestion
 
-**Note:** For even larger gains (50-80%), deploy to a VM or use `tc netem`
+**Note:** For larger gains (50-80%), deploy to a VM or use `tc netem`
 to add RTT and loss — the advantage compounds under real WAN conditions.
 
-The pattern is correct and expected: the multistream advantage
-surfaces in **tail latency** and is most visible on **small
-responses** queued behind big screen frames. Median is barely
-affected; p95 and max are.
+The multistream advantage surfaces in **tail latency** and is most
+visible on **small responses** queued behind big screen frames. Median
+is barely affected; p95 and max are.
 
 ### Datagram metadata
 
 The `-datagram-metadata` flag (enabled automatically by `-stress`)
-makes the multistream advantage even more dramatic by sending
-metadata (a11y / dom / perf) via **unreliable QUIC datagrams**
-instead of streams. This is a real QUIC feature that naive
-single-stream designs cannot use:
+sends metadata (a11y / dom / perf) via **unreliable QUIC datagrams**
+instead of streams, widening the multistream advantage. Naive
+single-stream designs cannot use this:
 
 - **Naive mode**: Everything rides the single `data` stream. Metadata
   queues behind screen frames and suffers stream flow-control overhead.
@@ -143,7 +150,7 @@ metadata that's the right trade: a lost a11y read is harmless; the
 next turn's read arrives fresh. Action responses (the large screenshots)
 always use streams for reliability.
 
-To see the datagram advantage explicitly:
+To see the datagram advantage:
 
 ```bash
 # Multistream WITHOUT datagrams (streams only)
@@ -203,15 +210,13 @@ two-host run.
 
 ## VM deployment for WAN testing
 
-To see the full multistream advantage under realistic network
-conditions, deploy the server on a cloud VM and run the client
-locally (or vice versa). This adds real RTT, loss, and bandwidth
-constraints that make the per-Kind dispatch differences much more
-visible.
+Deploy the server on a cloud VM and run the client locally (or vice
+versa). This adds real RTT, loss, and bandwidth constraints that make
+the per-Kind dispatch differences more visible.
 
 ### Automated deployment script
 
-Use the included `deploy-vm.sh` script to automate the setup:
+`deploy-vm.sh` automates the setup:
 
 ```bash
 ./examples/cua/deploy-vm.sh ubuntu@<PUBLIC_IP> <repo-url> [worktree-path] [server-port]
@@ -268,8 +273,7 @@ go run ./examples/cua/client -turns=200 -turn-gap=10ms 'https://<PUBLIC_IP>:4444
 
 ### Expected WAN results
 
-With ~50-100ms RTT and modest loss using the extreme stress settings,
-you should see dramatic differences:
+With ~50-100ms RTT and modest loss using the extreme stress settings:
 
 ```
                 naive p95   multi p95   delta
@@ -281,17 +285,15 @@ you should see dramatic differences:
 ```
 
 The 60 MB/s screen stream combined with RTT makes naive mode's
-single stream completely choke on metadata, while multistream +
-datagrams are barely affected.
-
-The datagram advantage (a11y/dom/perf) becomes extreme because
-datagrams bypass stream congestion entirely — a lost packet doesn't
-trigger retransmission, and there's no flow-control blocking.
+single stream choke on metadata, while multistream + datagrams are
+barely affected. Datagrams bypass stream congestion entirely — a lost
+packet doesn't trigger retransmission, and there's no flow-control
+blocking.
 
 ### Alternative: simulate WAN locally with tc
 
-If you don't want to use a real VM, you can simulate WAN conditions
-with Linux traffic control on a local second machine or VM:
+To simulate WAN conditions without a real VM, use Linux traffic control
+on a local second machine or VM:
 
 ```bash
 # On the server machine (or a VM)

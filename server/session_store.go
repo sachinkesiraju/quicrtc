@@ -17,6 +17,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"sync"
@@ -67,6 +68,50 @@ type SessionStore interface {
 	// Returns nil if the (tenant, sessionID) pair doesn't exist or
 	// has expired.
 	Resume(tenant, sessionID string) map[string]*pubsub.Receiver
+}
+
+// EvictableStore is the optional capability for stores that support
+// proactive expired-entry sweeps from a background goroutine. The
+// in-memory store implements it; remote stores like Redis typically
+// rely on backend-side TTLs and can leave this unimplemented (the
+// server then skips its background eviction loop for that store).
+type EvictableStore interface {
+	// EvictExpired removes all parked entries whose TTL has elapsed
+	// (and invokes their onEvict callbacks) and returns the count of
+	// entries evicted. Safe to call from a periodic ticker.
+	EvictExpired(now time.Time) int
+}
+
+// ClosableStore is the optional capability for stores that need to
+// release backend resources (network connections, goroutines) on
+// server shutdown. The in-memory store does not implement it.
+type ClosableStore interface {
+	Close() error
+}
+
+// DistributedSessionStore is the optional capability for stores that
+// publish session metadata across instances so the pre-Upgrade routing
+// handler can redirect resume requests to the instance currently
+// holding the parked receivers. Implemented by the sibling quicrtc-redis
+// (or any user-provided Redis/etcd/Postgres adapter), not by the core
+// memory store.
+//
+// Receivers themselves are in-process; a "shared" store holds only
+// metadata. The contract is:
+//
+//   - ParkMetadata is called by the server alongside Park to publish
+//     "this session ID lives on instance X until time Y, with these
+//     last-seen sequence numbers."
+//   - LookupInstance lets the server's /wt handler answer "where does
+//     this session live now?" before the WebTransport upgrade hijacks
+//     the response. That hand-off point is the only place an HTTP
+//     redirect can still be issued.
+//   - RegisterInstance announces this server's reachable address so
+//     other instances' LookupInstance calls can return it.
+type DistributedSessionStore interface {
+	RegisterInstance(ctx context.Context, instanceID, addr string) error
+	LookupInstance(tenant, sessionID string) (addr string, ok bool)
+	ParkMetadata(tenant, sessionID string, lastSeen map[string]uint32, expiresAt time.Time) error
 }
 
 // persistedSession is the snapshot the server keeps when a subscriber
@@ -150,18 +195,33 @@ func (s *memorySessionStore) Resume(tenant, sessionID string) map[string]*pubsub
 }
 
 // evictExpiredLocked drops parked sessions past their TTL. Called
-// opportunistically on every park/resume; no dedicated cleanup
-// goroutine. Receivers in evicted sessions are unsubscribed from
-// their broadcasters via the onEvict callback registered at Park
-// time so the broadcasters stop fanning to channels nobody will
-// ever read again.
-func (s *memorySessionStore) evictExpiredLocked(now time.Time) {
+// opportunistically on every park/resume AND from the server's
+// background eviction loop (via EvictExpired) so an idle server with
+// no traffic still reclaims expired parked sessions.
+//
+// Receivers in evicted sessions are unsubscribed from their
+// broadcasters via the onEvict callback registered at Park time so the
+// broadcasters stop fanning to channels nobody will ever read again.
+// Returns the count of entries evicted.
+func (s *memorySessionStore) evictExpiredLocked(now time.Time) int {
+	evicted := 0
 	for id, p := range s.byID {
 		if now.After(p.expiresAt) {
 			delete(s.byID, id)
 			if p.onEvict != nil {
 				p.onEvict()
 			}
+			evicted++
 		}
 	}
+	return evicted
+}
+
+// EvictExpired implements EvictableStore. Called from the server's
+// background eviction loop so idle servers reclaim parked sessions
+// even with no concurrent park/resume traffic.
+func (s *memorySessionStore) EvictExpired(now time.Time) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.evictExpiredLocked(now)
 }

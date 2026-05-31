@@ -53,12 +53,12 @@ fi
 echo ">>> Setting project: $PROJECT_ID"
 gcloud config set project "$PROJECT_ID"
 
-echo ">>> Creating firewall rule: allow ports 4433/udp, 4434/udp, 8080/tcp, 8090/tcp"
+echo ">>> Creating firewall rule: allow ports 4433/udp, 4434/udp, 4435/tcp, 8080/tcp, 8090/tcp"
 gcloud compute firewall-rules create quicrtc-bench-allow \
   --network=default \
   --direction=INGRESS \
   --action=ALLOW \
-  --rules=tcp:8080,tcp:8090,udp:4433,udp:4434 \
+  --rules=tcp:8080,tcp:8090,tcp:4435,udp:4433,udp:4434 \
   --source-ranges=0.0.0.0/0 \
   --target-tags=quicrtc-bench \
   || echo "  (firewall rule may already exist)"

@@ -81,6 +81,12 @@ export interface Hello {
   role: "recv" | "send";
   slug: string;
   ver: string;
+  /** Minimum wire version the client accepts. Omit to mean = ver. */
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  min_ver?: string;
+  /** Maximum wire version the client supports. Omit to mean = ver. */
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  max_ver?: string;
   /** Resume an existing session by ID; omit for fresh session. */
   session?: string;
   /** Optional protocol features the client supports. */
@@ -110,6 +116,36 @@ export interface SDP {
   session?: string;
   /** Negotiated features = client.features ∩ server.SupportedFeatures. */
   features?: string[];
+  /** Wire-format version both peers agreed on. Empty = legacy ver. */
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  neg_ver?: string;
+}
+
+/**
+ * KindStats is a periodic subscriber-to-publisher per-Kind
+ * observability report, sent at ~1 Hz when the "kind-stats" feature
+ * is negotiated. Field names match Go's wire.KindStats.
+ */
+export interface KindStats {
+  kind: string;
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  last_seq: number;
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  recv_p50_ms: number;
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  recv_p99_ms: number;
+  dropped?: number;
+}
+
+/**
+ * ErrorPayload is the structured TypeError frame body. Matches Go's
+ * wire.ErrorPayload. Code is short and machine-readable
+ * ("auth", "version", "track_unauthorized", ...); Reason is
+ * human-readable. Legacy non-JSON payloads decode as { reason }.
+ */
+export interface ErrorPayload {
+  code: string;
+  reason?: string;
 }
 
 /**
@@ -220,6 +256,7 @@ export enum FrameType {
   Backpressure = 0x0b,
   Unannounce = 0x0c,
   Resume = 0x0d,
+  KindStats = 0x0e,
 
   // Feed frames (uni streams)
   Keyframe = 0x20,

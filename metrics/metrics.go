@@ -69,6 +69,30 @@ type Metrics interface {
 	AuthFailed(reason string)
 }
 
+// KindMetrics is an optional capability interface for Metrics
+// implementations that surface per-Kind observability: congestion,
+// receive-side latency, queue depth. Servers and clients type-assert
+// at startup. If the configured Metrics implements KindMetrics, the
+// extended hooks fire alongside the base ones. Implementations that
+// don't (NoopMetrics, third-party adapters built against earlier
+// versions) keep working unchanged.
+type KindMetrics interface {
+	// RecordKindLatency records subscriber-reported p50/p99 receive
+	// latency for one Kind, taken from an inbound KindStats frame.
+	RecordKindLatency(kind string, p50, p99 time.Duration)
+
+	// RecordKindQueueDepth records the publisher-side queue depth
+	// for one Kind. Depth is the count of AUs waiting in the
+	// receiver channel; matches feed.PumpStats.QueueDepth. Called
+	// periodically by the session's observability sampler.
+	RecordKindQueueDepth(kind string, depth int)
+
+	// RecordCongestion records the current transport-level
+	// congestion-control state. bw is bytes/sec; rtt is the
+	// connection's smoothed round-trip time.
+	RecordCongestion(bw uint64, rtt time.Duration)
+}
+
 // NoopMetrics is the zero-cost default. All methods are no-ops.
 type NoopMetrics struct{}
 

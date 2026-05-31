@@ -1,0 +1,134 @@
+/* quicrtc compare — framework-free, layout only.
+   Shares the visual language of ts-sdk/examples/viewer. */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #0e1116;
+  color: #d9dee5;
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif;
+  padding: 16px;
+}
+
+code, pre, .mono { font-family: ui-monospace, "JetBrains Mono", "Fira Code", monospace; }
+.muted { color: #adb6c2; }
+.small { font-size: 12px; }
+.error { color: #ef9a9a; margin-top: 8px; font-size: 13px; }
+
+h2 {
+  margin: 0 0 8px; font-size: 13px; font-weight: 600; color: #b6c0cc;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+
+.bar {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 14px;
+  background: #181c23; border: 1px solid #232831; border-radius: 6px;
+  margin-bottom: 12px;
+}
+.bar .spacer { flex: 1; }
+.bar strong { font-weight: 600; white-space: nowrap; }
+
+.card {
+  background: #181c23; border: 1px solid #232831; border-radius: 6px;
+  padding: 14px 16px; margin-bottom: 12px;
+}
+
+.connect .field { display: block; margin-top: 10px; }
+.connect .field-label { display: block; font-size: 12px; color: #adb6c2; margin-bottom: 4px; }
+.connect input[type="url"] {
+  width: 100%; padding: 8px 10px;
+  background: #0e1116; border: 1px solid #2a313c; border-radius: 4px;
+  color: #d9dee5; font: 13px ui-monospace, monospace;
+}
+.connect .controls {
+  display: flex; align-items: center; gap: 14px; margin-top: 12px;
+}
+.inline { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #adb6c2; }
+.inline input { width: 64px; padding: 5px 8px; background: #0e1116; border: 1px solid #2a313c; border-radius: 4px; color: #d9dee5; font: 13px ui-monospace, monospace; }
+
+button {
+  padding: 8px 14px; background: #2d6cdf; color: white; border: 0; border-radius: 4px;
+  font: 13px ui-sans-serif, system-ui, sans-serif; cursor: pointer;
+}
+button.ghost { background: transparent; color: #adb6c2; border: 1px solid #2a313c; }
+button:hover { filter: brightness(1.1); }
+
+.pill {
+  font-size: 12px; padding: 3px 10px; border-radius: 999px;
+  background: #2a313c; color: #d9dee5;
+}
+.pill[data-state="connected"]    { background: #1f5e3a; color: #d6f0df; }
+.pill[data-state="connecting"]   { background: #6b4f15; color: #f5e2b6; }
+.pill[data-state="error"]        { background: #6a1f1f; color: #f1d1d1; }
+.pill[data-state="disconnected"] { background: #2a313c; color: #adb6c2; }
+
+/* ===== Two panes side by side ===== */
+.panes {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (max-width: 880px) { .panes { grid-template-columns: 1fr; } }
+
+.pane {
+  background: #181c23; border: 1px solid #232831; border-radius: 6px;
+  padding: 12px; display: flex; flex-direction: column; gap: 10px;
+}
+.pane-head { display: flex; align-items: center; gap: 10px; }
+.pane-title { font-weight: 600; font-size: 15px; }
+.pane-mode { font-size: 11px; color: #6c7785; margin-left: auto; }
+
+.screen-wrap { display: flex; flex-direction: column; gap: 4px; }
+.screen-canvas {
+  width: 100%; height: 180px; background: #0e1116;
+  border: 1px solid #2a313c; border-radius: 4px; display: block;
+}
+.screen-meta {
+  display: flex; gap: 12px; font: 12px ui-monospace, monospace; color: #adb6c2;
+}
+.screen-meta .screen-rate { margin-left: auto; }
+
+/* ===== Per-lane cards ===== */
+.lanes { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.lane {
+  border: 1px solid #232831; border-radius: 5px; padding: 8px 10px;
+  background: #0e1116;
+}
+.lane-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.lane-name { font-weight: 600; font: 12px ui-monospace, monospace; color: #a8c5f3; }
+
+/* The freeze indicator — the headline element. Big and obvious. */
+.lane-freeze {
+  margin-left: auto; font: 11px ui-monospace, monospace; font-weight: 700;
+  padding: 2px 8px; border-radius: 999px; letter-spacing: 0.04em;
+}
+.lane-freeze[data-frozen="0"] { background: #14361f; color: #7ee7a1; }       /* live   */
+.lane-freeze[data-frozen="1"] { background: #6b4f15; color: #f5e2b6; }       /* slow   */
+.lane-freeze[data-frozen="2"] {                                              /* FROZEN */
+  background: #6a1f1f; color: #ffd5d5; animation: pulse 0.8s ease-in-out infinite;
+}
+@keyframes pulse { 0%,100% { filter: brightness(1); } 50% { filter: brightness(1.7); } }
+
+.lane.frozen { border-color: #7a2a2a; }
+.lane-age { font: 12px ui-monospace, monospace; color: #adb6c2; margin-bottom: 4px; }
+.lane-age .age-ms { color: #d6e6f5; font-size: 15px; }
+.lane.frozen .age-ms { color: #ff9a9a; }
+.lane-stats { display: flex; gap: 12px; font-size: 11px; color: #6c7785; }
+.lane-stats b { color: #d6e6f5; }
+
+/* ===== Scrolling feed ===== */
+.feed-wrap { display: flex; flex-direction: column; flex: 1; min-height: 0; }
+.feed-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #6c7785; margin-bottom: 4px; }
+.feed {
+  list-style: none; margin: 0; padding: 6px 8px;
+  background: #0e1116; border: 1px solid #232831; border-radius: 4px;
+  font: 11px ui-monospace, monospace; height: 150px; overflow: auto;
+}
+.feed li { padding: 2px 0; border-bottom: 1px solid #161b21; color: #d9dee5; white-space: nowrap; }
+.feed li:last-child { border-bottom: 0; }
+.feed li .lane-tag { display: inline-block; min-width: 52px; color: #a8c5f3; }
+.feed li .lat { color: #7ee7a1; }
+.feed li .lat.slow { color: #f5e2b6; }
+.feed li .lat.bad  { color: #ff9a9a; }

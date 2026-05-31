@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 860" role="img" aria-label="Logic flow of the computer-use agent example, with every arrow explained. The agent loop (the client) is the brain — it decides what to click, type, and inspect. The browser host (the server) is where the page being driven actually runs. Continuously, the server sends fresh screenshots of the page so the agent can see what is on screen. Per agent turn, the client sends four small request messages: do-this-action, list-accessible-elements, send-the-HTML, send-performance-stats. The server handles them in parallel — each gets its own worker so they do not take turns. The responses come back on the lane that fits each one: the action result includes a fresh screenshot so it rides the reliable lane, while the three small inspections come back as fire-and-forget packets.">
+  <defs>
+    <marker id="cua-arrow-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#c2410c"/>
+    </marker>
+    <marker id="cua-arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#1d4ed8"/>
+    </marker>
+    <marker id="cua-arrow-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#047857"/>
+    </marker>
+    <marker id="cua-arrow-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#6d28d9"/>
+    </marker>
+    <style>
+      .title       { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 18px; font-weight: 700; fill: #0f172a; }
+      .subtitle    { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; fill: #475569; }
+      .actor-box   { fill: #f8fafc; stroke: #475569; stroke-width: 1.4; }
+      .actor-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 14px; fill: #0f172a; font-weight: 700; text-anchor: middle; }
+      .actor-role  { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; fill: #475569; text-anchor: middle; }
+      .phase-box   { fill: #fefce8; stroke: #ca8a04; stroke-width: 1; stroke-dasharray: 4 4; }
+      .phase-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 12px; fill: #92400e; font-weight: 700; }
+      .step-num    { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 13px; font-weight: 700; fill: #1f2937; }
+      .arrow-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; fill: #0f172a; font-weight: 600; }
+      .why         { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 10px; fill: #6b7280; font-style: italic; }
+      .handler-box { fill: #ede9fe; stroke: #6d28d9; stroke-width: 1; }
+      .handler-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 10px; fill: #4c1d95; font-weight: 600; text-anchor: middle; }
+      .handler-note { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 9px; fill: #6d28d9; text-anchor: middle; }
+      .footnote    { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; fill: #166534; font-weight: 600; }
+    </style>
+  </defs>
+
+  <!-- Title -->
+  <text class="title" x="490" y="28" text-anchor="middle">Inside a computer-use agent — what every arrow means</text>
+  <text class="subtitle" x="490" y="46" text-anchor="middle">A cloud-hosted browser the agent drives by sending action requests and asking for inspections. From examples/cua/.</text>
+
+  <!-- Actor columns -->
+  <rect class="actor-box" x="20" y="70" width="170" height="760" rx="6"/>
+  <text class="actor-label" x="105" y="95">Agent loop</text>
+  <text class="actor-role"  x="105" y="112">("client" in the code)</text>
+  <text class="actor-role"  x="105" y="130">the brain — decides</text>
+  <text class="actor-role"  x="105" y="144">what to click, type,</text>
+  <text class="actor-role"  x="105" y="158">and inspect next</text>
+
+  <rect class="actor-box" x="790" y="70" width="170" height="760" rx="6"/>
+  <text class="actor-label" x="875" y="95">Browser host</text>
+  <text class="actor-role"  x="875" y="112">("server" in the code)</text>
+  <text class="actor-role"  x="875" y="130">where the page being</text>
+  <text class="actor-role"  x="875" y="144">driven actually runs;</text>
+  <text class="actor-role"  x="875" y="158">executes actions</text>
+
+  <!-- ============== PHASE 0: background screen track ============== -->
+  <rect class="phase-box" x="205" y="180" width="570" height="90" rx="6"/>
+  <text class="phase-label" x="220" y="200">Always on — live screenshots of the page</text>
+
+  <line stroke="#c2410c" stroke-width="2.5" x1="785" y1="232" x2="195" y2="232" marker-end="url(#cua-arrow-orange)"/>
+  <text class="arrow-label" x="490" y="224" text-anchor="middle">a fresh PNG of the page, ~5–30 times per second</text>
+  <text class="why" x="490" y="252" text-anchor="middle">WHY: the page lives on the server. The agent can't act on it until it sees what's on screen,</text>
+  <text class="why" x="490" y="264" text-anchor="middle">so the server pushes a continuous stream of screenshots back.</text>
+
+  <!-- ============== PHASE 2: per-turn label ============== -->
+  <text class="phase-label" x="490" y="300" text-anchor="middle">One agent turn — repeats every time the agent takes a step ⤵</text>
+
+  <!-- ============== PHASE 3: client sends 4 datagram requests ============== -->
+  <text class="step-num"   x="210" y="332">① The agent asks the browser four small things, back-to-back</text>
+  <text class="why"        x="210" y="346">All four go out as tiny packets in microseconds. The agent doesn't wait between them.</text>
+
+  <!-- action -->
+  <line stroke="#1d4ed8" stroke-width="1.6" x1="195" y1="370" x2="785" y2="370" marker-end="url(#cua-arrow-blue)"/>
+  <text class="arrow-label" x="490" y="365" text-anchor="middle">"action: click the button at (x, y)"  or  "type 'hello'"</text>
+  <text class="why"         x="490" y="384" text-anchor="middle">WHY: the agent decided this is its next move. Tell the browser to do it.</text>
+
+  <!-- a11y -->
+  <line stroke="#1d4ed8" stroke-width="1.6" x1="195" y1="412" x2="785" y2="412" marker-end="url(#cua-arrow-blue)"/>
+  <text class="arrow-label" x="490" y="407" text-anchor="middle">"a11y: list every interactive element on the page"</text>
+  <text class="why"         x="490" y="426" text-anchor="middle">WHY: an accessibility tree is easier for the agent to reason over than raw pixels.</text>
+
+  <!-- dom -->
+  <line stroke="#1d4ed8" stroke-width="1.6" x1="195" y1="454" x2="785" y2="454" marker-end="url(#cua-arrow-blue)"/>
+  <text class="arrow-label" x="490" y="449" text-anchor="middle">"dom: send the page's HTML structure"</text>
+  <text class="why"         x="490" y="468" text-anchor="middle">WHY: lets the agent find elements by tag/id/class without OCR'ing the screenshot.</text>
+
+  <!-- perf -->
+  <line stroke="#1d4ed8" stroke-width="1.6" x1="195" y1="496" x2="785" y2="496" marker-end="url(#cua-arrow-blue)"/>
+  <text class="arrow-label" x="490" y="491" text-anchor="middle">"perf: send the current performance stats"</text>
+  <text class="why"         x="490" y="510" text-anchor="middle">WHY: telemetry — is the page slow? are there errors? are we waiting on a network call?</text>
+
+  <!-- ============== PHASE 4: server fans out into goroutines ============== -->
+  <text class="step-num"   x="210" y="544">② The server runs all four in parallel — they don't take turns</text>
+  <text class="why"        x="210" y="558">Each question gets its own worker; the only thing they share is the network connection.</text>
+
+  <rect class="handler-box" x="215" y="572" width="135" height="42" rx="4"/>
+  <text class="handler-label" x="282" y="589">does the click/type</text>
+  <text class="handler-note"  x="282" y="604">action worker · ~30 ms</text>
+
+  <rect class="handler-box" x="365" y="572" width="135" height="42" rx="4"/>
+  <text class="handler-label" x="432" y="589">walks the a11y tree</text>
+  <text class="handler-note"  x="432" y="604">a11y worker · ~12 ms</text>
+
+  <rect class="handler-box" x="515" y="572" width="135" height="42" rx="4"/>
+  <text class="handler-label" x="582" y="589">serializes the DOM</text>
+  <text class="handler-note"  x="582" y="604">dom worker · ~8 ms</text>
+
+  <rect class="handler-box" x="665" y="572" width="135" height="42" rx="4"/>
+  <text class="handler-label" x="732" y="589">reads perf counters</text>
+  <text class="handler-note"  x="732" y="604">perf worker · ~6 ms</text>
+
+  <!-- ============== PHASE 5: server publishes responses on per-Kind lanes ============== -->
+  <text class="step-num"  x="210" y="644">③ Each answer comes back on the lane that fits it best</text>
+  <text class="why"       x="210" y="658">The big payload (a fresh screenshot of the new page state) gets the reliable lane; tiny reads use fire-and-forget.</text>
+
+  <!-- action response: thick purple = reliable token stream -->
+  <line stroke="#6d28d9" stroke-width="3" x1="785" y1="682" x2="195" y2="682" marker-end="url(#cua-arrow-purple)"/>
+  <text class="arrow-label" x="490" y="677" text-anchor="middle">action result: "done — here's what the page looks like now" (fresh screenshot)</text>
+  <text class="why"         x="490" y="696" text-anchor="middle">WHY: big, must arrive intact. Rides the reliable lane (in-order byte stream).</text>
+
+  <!-- a11y response -->
+  <line stroke="#047857" stroke-width="1.6" x1="785" y1="722" x2="195" y2="722" marker-end="url(#cua-arrow-green)"/>
+  <text class="arrow-label" x="490" y="717" text-anchor="middle">a11y answer: small JSON of accessible elements</text>
+  <text class="why"         x="490" y="736" text-anchor="middle">WHY: tiny enough to fit in one packet. If it gets lost, the next turn asks again — no retransmits needed.</text>
+
+  <!-- dom response -->
+  <line stroke="#047857" stroke-width="1.6" x1="785" y1="762" x2="195" y2="762" marker-end="url(#cua-arrow-green)"/>
+  <text class="arrow-label" x="490" y="757" text-anchor="middle">dom answer: small HTML snapshot</text>
+  <text class="why"         x="490" y="776" text-anchor="middle">WHY: same — small, latency-sensitive, tolerant of an occasional loss.</text>
+
+  <!-- perf response -->
+  <line stroke="#047857" stroke-width="1.6" x1="785" y1="802" x2="195" y2="802" marker-end="url(#cua-arrow-green)"/>
+  <text class="arrow-label" x="490" y="797" text-anchor="middle">perf answer: small JSON of metrics</text>
+  <text class="why"         x="490" y="816" text-anchor="middle">WHY: telemetry — should never block anything else. Fire-and-forget is the right shape.</text>
+
+  <!-- ============== Footer ============== -->
+  <text class="footnote" x="490" y="846" text-anchor="middle">All of this on ONE connection. The screen video and the small messages don't slow each other down.</text>
+</svg>

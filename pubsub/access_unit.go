@@ -72,6 +72,19 @@ type AccessUnit struct {
 	//   ToolCalls: {"request_id":"req_abc","function":"search",
 	//               "args_schema":"v1"}
 	//   Video:     {"layer":"1080p","sps":"<base64>"}
+	//
+	// Reserved keys (v1.0.2 conventions; opt-in, never required):
+	//   - "request_id"  app-level request/response correlation. Set
+	//                   on the request AU; the responder echoes the
+	//                   same value on its reply AU. Recommended for
+	//                   ToolCalls so concurrent parallel calls can
+	//                   be matched without relying on Seq ordering.
+	//   - "trace_id"    distributed-tracing trace ID (W3C traceparent
+	//                   trace-id portion). Propagate across track
+	//                   boundaries so a single agent turn appears
+	//                   as one trace.
+	//   - "span_id"     distributed-tracing span ID for this AU.
+	//
 	// Wire-side: a varint-prefixed metadata block precedes the
 	// payload (~5–20 bytes overhead per AU). v1 receivers ignore.
 	// Nil or empty means "no metadata" — common for telemetry.

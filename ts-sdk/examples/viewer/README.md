@@ -40,8 +40,8 @@ go run ./examples/agent_pubsub/server
 # prints: share: https://127.0.0.1:NNNN/wt#slug=...&hash=...
 ```
 
-Then serve `ts-sdk/` over HTTP and open the viewer. Any static file
-server works:
+Then serve `ts-sdk/` over HTTP and open the viewer with any static file
+server:
 
 ```bash
 # from the ts-sdk/ directory
@@ -73,8 +73,6 @@ The viewer is server-agnostic. Try:
 - `go run ./examples/relay -listen … -upstream …` — same view as
   `publisher` (that's the teaching point: a relay is transparent on
   the wire).
-- `go run ./examples/datachannel/server` — the DataChannel transcript
-  appears; heartbeats arrive every second.
 
 ## Implementation notes
 

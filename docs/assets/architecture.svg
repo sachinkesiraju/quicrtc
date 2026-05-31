@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 920 540" role="img" aria-label="Package architecture of quicrtc. Your application code calls into the public API packages — server, client, peerconnection, relay, and datachannel. Those sit on top of session and track for orchestration. The feed package handles dispatch, routing each track to one of four wire patterns: stream-per-keyframe video, persistent low-latency stream, one-stream-per-call, or fire-and-forget datagrams. pubsub provides the in-process broadcaster. wire defines the byte formats; transport defines sender/receiver interfaces; cert and metrics are utility packages. At the bottom, QUIC and WebTransport are the underlying network transports.">
+  <defs>
+    <style>
+      .title       { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 18px; font-weight: 700; fill: #0f172a; }
+      .subtitle    { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; fill: #475569; }
+      .layer-label { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 11px; font-weight: 700; fill: #475569; text-anchor: end; }
+      .layer-sub   { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 10px; fill: #94a3b8; text-anchor: end; font-style: italic; }
+      .pkg-name    { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace; font-size: 12px; font-weight: 700; fill: #0f172a; text-anchor: middle; }
+      .pkg-note    { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 10px; fill: #475569; text-anchor: middle; }
+      .external    { fill: #f1f5f9; stroke: #64748b; stroke-width: 1.4; stroke-dasharray: 4 3; }
+      .public-api  { fill: #dbeafe; stroke: #1d4ed8; stroke-width: 1.4; }
+      .orchestration { fill: #ddd6fe; stroke: #6d28d9; stroke-width: 1.2; }
+      .dispatch    { fill: #fef3c7; stroke: #b45309; stroke-width: 1.2; }
+      .infra       { fill: #fee2e2; stroke: #991b1b; stroke-width: 1.2; }
+      .util        { fill: #e0e7ff; stroke: #4f46e5; stroke-width: 1; stroke-dasharray: 3 3; }
+      .transport-layer { fill: #f0fdf4; stroke: #047857; stroke-width: 1.4; stroke-dasharray: 4 3; }
+      .lane-tag    { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-size: 9px; fill: #92400e; }
+      .arrow       { stroke: #94a3b8; stroke-width: 1; fill: none; }
+    </style>
+  </defs>
+
+  <text class="title" x="460" y="28" text-anchor="middle">quicrtc — package layering</text>
+  <text class="subtitle" x="460" y="46" text-anchor="middle">What you import (top) and what it sits on top of (bottom). Each layer only depends on the ones below it.</text>
+
+  <!-- ============ Layer 1: Your code ============ -->
+  <text class="layer-label" x="170" y="92">YOUR CODE</text>
+  <text class="layer-sub"   x="170" y="106">a Go program or browser app</text>
+
+  <rect class="external" x="195" y="74" width="600" height="40" rx="6"/>
+  <text class="pkg-name" x="495" y="92">your application</text>
+  <text class="pkg-note" x="495" y="106">e.g., examples/cua/server/main.go or a browser viewer</text>
+
+  <!-- ============ Layer 2: Public API ============ -->
+  <text class="layer-label" x="170" y="160">PUBLIC API</text>
+  <text class="layer-sub"   x="170" y="174">what you import</text>
+
+  <rect class="public-api" x="205" y="140" width="100" height="50" rx="5"/>
+  <text class="pkg-name" x="255" y="158">server</text>
+  <text class="pkg-note" x="255" y="172">publisher side</text>
+  <text class="pkg-note" x="255" y="184">(Go)</text>
+
+  <rect class="public-api" x="315" y="140" width="100" height="50" rx="5"/>
+  <text class="pkg-name" x="365" y="158">client</text>
+  <text class="pkg-note" x="365" y="172">subscriber side</text>
+  <text class="pkg-note" x="365" y="184">(Go and TS)</text>
+
+  <rect class="public-api" x="425" y="140" width="115" height="50" rx="5"/>
+  <text class="pkg-name" x="482" y="158">peerconnection</text>
+  <text class="pkg-note" x="482" y="172">server+client</text>
+  <text class="pkg-note" x="482" y="184">wrapper</text>
+
+  <rect class="public-api" x="550" y="140" width="100" height="50" rx="5"/>
+  <text class="pkg-name" x="600" y="158">relay</text>
+  <text class="pkg-note" x="600" y="172">1-to-many</text>
+  <text class="pkg-note" x="600" y="184">fanout</text>
+
+  <rect class="public-api" x="660" y="140" width="120" height="50" rx="5"/>
+  <text class="pkg-name" x="720" y="158">datachannel</text>
+  <text class="pkg-note" x="720" y="172">bidi control</text>
+  <text class="pkg-note" x="720" y="184">messages</text>
+
+  <!-- ============ Layer 3: Orchestration ============ -->
+  <text class="layer-label" x="170" y="232">ORCHESTRATION</text>
+  <text class="layer-sub"   x="170" y="246">per-session state</text>
+
+  <rect class="orchestration" x="295" y="216" width="180" height="44" rx="5"/>
+  <text class="pkg-name" x="385" y="234">session</text>
+  <text class="pkg-note" x="385" y="248">handshake · auth · resume · routing</text>
+
+  <rect class="orchestration" x="485" y="216" width="180" height="44" rx="5"/>
+  <text class="pkg-name" x="575" y="234">track</text>
+  <text class="pkg-note" x="575" y="248">Kind / DeliveryClass definitions</text>
+
+  <!-- ============ Layer 4: Dispatch ============ -->
+  <text class="layer-label" x="170" y="304">DISPATCH</text>
+  <text class="layer-sub"   x="170" y="318">picks the wire pattern</text>
+
+  <rect class="dispatch" x="205" y="284" width="575" height="56" rx="5"/>
+  <text class="pkg-name" x="492" y="302">feed</text>
+  <text class="pkg-note" x="492" y="316">routes each track to one of four wire patterns:</text>
+  <text class="lane-tag" x="225" y="332">▸ stream-per-keyframe video</text>
+  <text class="lane-tag" x="370" y="332">▸ persistent low-latency stream</text>
+  <text class="lane-tag" x="540" y="332">▸ one-stream-per-call</text>
+  <text class="lane-tag" x="680" y="332">▸ fire-and-forget datagrams</text>
+
+  <!-- ============ Layer 5: pubsub ============ -->
+  <text class="layer-label" x="170" y="374">QUEUEING</text>
+  <text class="layer-sub"   x="170" y="388">in-process broadcast</text>
+
+  <rect class="infra" x="295" y="358" width="370" height="40" rx="5"/>
+  <text class="pkg-name" x="480" y="376">pubsub</text>
+  <text class="pkg-note" x="480" y="390">bounded queue · keyframe-aware drop policy</text>
+
+  <!-- ============ Layer 6: Wire & transport ============ -->
+  <text class="layer-label" x="170" y="436">WIRE FORMAT</text>
+  <text class="layer-sub"   x="170" y="450">bytes on the wire</text>
+
+  <rect class="infra" x="205" y="418" width="195" height="40" rx="5"/>
+  <text class="pkg-name" x="302" y="436">wire</text>
+  <text class="pkg-note" x="302" y="450">frame &amp; datagram byte formats</text>
+
+  <rect class="infra" x="410" y="418" width="195" height="40" rx="5"/>
+  <text class="pkg-name" x="507" y="436">transport</text>
+  <text class="pkg-note" x="507" y="450">Sender / Receiver interfaces</text>
+
+  <!-- ============ Side: utilities ============ -->
+  <rect class="util" x="630" y="376" width="155" height="40" rx="5"/>
+  <text class="pkg-name" x="707" y="394">cert</text>
+  <text class="pkg-note" x="707" y="408">dev TLS · hot reload</text>
+
+  <rect class="util" x="630" y="418" width="155" height="40" rx="5"/>
+  <text class="pkg-name" x="707" y="436">metrics</text>
+  <text class="pkg-note" x="707" y="450">counters &amp; probes</text>
+
+  <!-- ============ Layer 7: external ============ -->
+  <text class="layer-label" x="170" y="498">UNDERLYING</text>
+  <text class="layer-sub"   x="170" y="512">handled by the platform</text>
+
+  <rect class="transport-layer" x="195" y="478" width="600" height="40" rx="6"/>
+  <text class="pkg-name" x="495" y="496">QUIC · WebTransport</text>
+  <text class="pkg-note" x="495" y="510">quic-go on the server, browser-native WebTransport in the client</text>
+
+</svg>

@@ -118,6 +118,31 @@ output.
 Running `-live` **without** the build tag prints a clear message and
 exits (the stub explains how to build it).
 
+## Record & replay a session
+
+Add `-record <path>` to either mode to capture the session to a `.qrtc`
+file — the screen, reasoning, and tool-call lanes on one capture clock:
+
+```bash
+cd examples/cua-live
+go run . -fake -record /tmp/sess.qrtc      # or -live, with the cualive tag
+```
+
+Inspect it with the [`replay`](../replay/) tool, or export the browser
+scrubber's bundle and open it:
+
+```bash
+# from the repo root
+go run ./examples/replay -file /tmp/sess.qrtc                    # text timeline
+go run ./examples/replay -file /tmp/sess.qrtc -json -payloads \
+    > examples/replay/viewer/bundle.json                         # browser bundle
+cd examples/replay/viewer && python3 -m http.server 5174         # open localhost:5174
+```
+
+Telemetry rides datagrams sent straight to each session rather than a
+published track, so the recording holds the screen, reasoning, and
+tool-call lanes.
+
 ## Files
 
 - [`brain.go`](./brain.go) — the `Brain` interface, the `Action` /

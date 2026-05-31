@@ -43,6 +43,7 @@ import (
 
 	"github.com/sachinkesiraju/quicrtc/examples/internal/status"
 	"github.com/sachinkesiraju/quicrtc/pubsub"
+	"github.com/sachinkesiraju/quicrtc/record"
 	"github.com/sachinkesiraju/quicrtc/server"
 	"github.com/sachinkesiraju/quicrtc/track"
 	"github.com/sachinkesiraju/quicrtc/wire"
@@ -70,13 +71,14 @@ const (
 
 func main() {
 	var (
-		fake     = flag.Bool("fake", false, "scripted brain + synthesized frames; no Chrome, no API key, no network")
-		live     = flag.Bool("live", false, "Claude computer-use over a real Chromium (needs ANTHROPIC_API_KEY + Chrome; build -tags cualive)")
-		bind     = flag.String("bind", "127.0.0.1:0", "UDP bind address")
-		stepEach = flag.Duration("step", 1200*time.Millisecond, "minimum wall-time per agent turn (paces the demo so it's watchable)")
-		goalFlag = flag.String("goal", "", "task for the agent (live mode); empty uses a built-in default")
-		startURL = flag.String("url", "https://news.ycombinator.com", "initial page to open (live mode)")
-		model    = flag.String("model", "claude-sonnet-4-20250514", "Anthropic model id (live mode; computer-use beta)")
+		fake       = flag.Bool("fake", false, "scripted brain + synthesized frames; no Chrome, no API key, no network")
+		live       = flag.Bool("live", false, "Claude computer-use over a real Chromium (needs ANTHROPIC_API_KEY + Chrome; build -tags cualive)")
+		bind       = flag.String("bind", "127.0.0.1:0", "UDP bind address")
+		stepEach   = flag.Duration("step", 1200*time.Millisecond, "minimum wall-time per agent turn (paces the demo so it's watchable)")
+		goalFlag   = flag.String("goal", "", "task for the agent (live mode); empty uses a built-in default")
+		startURL   = flag.String("url", "https://news.ycombinator.com", "initial page to open (live mode)")
+		model      = flag.String("model", "claude-sonnet-4-20250514", "Anthropic model id (live mode; computer-use beta)")
+		recordPath = flag.String("record", "", "also record the session to this .qrtc file; replay/scrub it with examples/replay")
 	)
 	flag.Parse()
 
@@ -144,6 +146,22 @@ func main() {
 	screenPub := srv.AddTrackSpec(server.TrackSpec{Name: trackScreen, Kind: track.KindVideo})
 	reasoningPub := srv.AddTrackSpec(server.TrackSpec{Name: trackReasoning, Kind: track.KindTokens})
 	toolPub := srv.AddTrackSpec(server.TrackSpec{Name: trackToolCalls, Kind: track.KindToolCalls})
+
+	// Optionally record the session. AttachRecorder installs a sink on
+	// every track's broadcaster, so the .qrtc captures exactly the AUs
+	// subscribers receive — all on one capture clock, which is what makes
+	// the replay scrubber's cross-lane reconstruction exact. Export it for
+	// the browser scrubber with:
+	//   go run ./examples/replay -file <path> -json -payloads > examples/replay/viewer/bundle.json
+	if *recordPath != "" {
+		rec, err := record.NewFileRecorder(*recordPath)
+		if err != nil {
+			log.Fatalf("record: %v", err)
+		}
+		detach := srv.AttachRecorder(rec)
+		defer func() { detach(); _ = rec.Close() }()
+		fmt.Printf("recording to %s — scrub with: go run ./examples/replay -file %s\n", *recordPath, *recordPath)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()

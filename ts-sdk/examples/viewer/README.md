@@ -73,8 +73,6 @@ The viewer is server-agnostic. Try:
 - `go run ./examples/relay -listen … -upstream …` — same view as
   `publisher` (that's the teaching point: a relay is transparent on
   the wire).
-- `go run ./examples/datachannel/server` — the DataChannel transcript
-  appears; heartbeats arrive every second.
 
 ## Implementation notes
 

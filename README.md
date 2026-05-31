@@ -98,19 +98,7 @@ const tokens = await client.recvOn('reasoning');
 console.log(new TextDecoder().decode(tokens.bytes));
 ```
 
-Runnable: [`examples/publisher/`](examples/publisher/) (server) and [`ts-sdk/examples/viewer/`](ts-sdk/examples/viewer/) (a browser viewer that drives all four lanes at once). Deploying? See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Stuck? [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
-
-## Examples
-
-| Example | What it shows |
-|---|---|
-| [`publisher`](examples/publisher/) + [`subscriber`](examples/subscriber/) | minimal 1:1 publish / subscribe |
-| [`agent_pubsub`](examples/agent_pubsub/) | four lanes on one connection |
-| [`cua`](examples/cua/) | naive vs. multistream dispatch — a measured benchmark (mocks the browser) |
-| [`cua-live`](examples/cua-live/) | a **real** computer-use agent loop; `-fake` runs anywhere, `-live` drives Chromium via Claude |
-| [`relay`](examples/relay/) | 1:N broadcast through the native relay |
-| [`replay`](examples/replay/) | inspect a recorded session + an [interactive browser scrubber](examples/replay/viewer/) |
-| [`compare`](ts-sdk/examples/compare/) | browser side-by-side — tokens freeze on a naive single stream, keep flowing on quicrtc lanes |
+Runnable: [`examples/publisher/`](examples/publisher/) (server) and [`ts-sdk/examples/viewer/`](ts-sdk/examples/viewer/) (a browser viewer that drives all four lanes at once). More — a real computer-use loop, the native relay, a session-replay scrubber — in [`examples/`](examples/) and [`ts-sdk/examples/`](ts-sdk/examples/). Deploying? See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Stuck? [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
 ## FAQ
 

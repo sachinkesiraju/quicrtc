@@ -9,37 +9,30 @@
 
 quicrtc is a Go library and TypeScript SDK designed for the traffic shape that modern AI agents produce. It streams video, low-latency tokens, RPC-shaped tool calls, and fire-and-forget telemetry over a single QUIC/WebTransport connection.
 
-## One connection, four lanes
+Most agent products today glue together separate transports — SSE for LLM tokens, WebRTC for video, gRPC for tool calls, OTLP for telemetry — each with its own connection lifecycle, reconnect story, and head-of-line (HOL) behavior. quicrtc folds that stack into a single QUIC connection, and each kind of traffic gets routed the way it needs.
 
-An AI agent sends a user several kinds of data at once: live screen video, the model's tokens, tool calls, and telemetry. The usual way to ship that is four separate protocols — WebRTC for video, SSE for tokens, gRPC for tool calls, OTLP for telemetry. Four connections, four handshakes, four auth paths, four things to reconnect.
-
-quicrtc carries all four on **one** connection. Each kind of traffic gets its own lane, and a busy lane never blocks the others.
+All four tracks share QUIC's 0-RTT resume and connection migration, so reconnecting restores every workload in one round-trip instead of three handshakes.
 
 <p align="center"><img src="docs/assets/cua_flow.svg" alt="One QUIC connection carrying four parallel lanes during a computer-use agent turn: continuous screen video, the per-turn action request and result, and small snapshot datagrams." width="880"></p>
 
-| Lane | Carries | How it's sent | Why it matters |
+A track's `Kind` picks its wire shape. Video bursts and the token stream sit on separate QUIC streams and never share a send queue.
+
+| | Glued stack | quicrtc | Why it matters |
 |---|---|---|---|
-| 🟦 **Video** | screen frames | one stream per group-of-pictures | a dropped frame recovers in **~33 ms**, not ~1–2 s |
-| 🟩 **Tokens** | the model's reasoning | a low-latency stream | tokens keep flowing **during** a video burst |
-| 🟧 **Tool calls** | each turn's action + result | a bidirectional stream per call | calls run in **parallel** |
-| ⬜ **Telemetry** | small fire-and-forget snapshots | QUIC datagrams | metrics **skip the queue** entirely |
-
-### vs. the glued stack
-
-The four-protocol stack costs you on everything the lanes table doesn't show:
-
-| | WebRTC + SSE + gRPC + OTLP | quicrtc |
-|---|---|---|
-| Connections to manage | 4 | **1** |
-| Handshake + auth | 4× | **1×** |
-| Reconnect after a drop | 3 round-trips | **1** |
-| 1-to-many fanout | SFU re-encodes per hop | **native relay forwards bytes as-is** |
-| Browser client size | heavy | **~6 KB gzipped** (~20 KB minified) |
-| Session recording / replay | bolt on a 5th system | **built in, on one capture clock** |
+| 🟦 **Video** | WebRTC | one stream per group-of-pictures | a dropped frame recovers in **~33 ms**, not ~1–2 s |
+| 🟩 **Tokens** | SSE | a low-latency stream | keep flowing **during** a video burst |
+| 🟧 **Tool calls** | gRPC | a bidirectional stream per call | calls run in **parallel** |
+| ⬜ **Telemetry** | OTLP | QUIC datagrams | metrics **skip the queue** entirely |
+| **Connections** | 4 | **1** | one to open, secure, and watch |
+| **Handshake + auth** | 4× | **1×** | one login covers every lane |
+| **Reconnect after a drop** | 3 round-trips | **1** | 0-RTT resume + connection migration |
+| **1-to-many fanout** | SFU re-encodes per hop | **native relay** | forwards bytes as-is, no re-encode |
+| **Browser client** | heavy | **~6 KB gzipped** | ~20 KB minified |
+| **Recording / replay** | a 5th system | **built in** | on one capture clock |
 
 ## Performance
 
-Head-to-head: same workload, same machine, same network. Lower is better. Loopback rows use a synthetic 50 ms RTT; WAN rows use two GCP VMs across US regions. [Full methodology](testing/benchmarks/METHODOLOGY.md).
+Same workload, same machine, same network, baseline and quicrtc back to back. Lower is better. Loopback rows use a synthetic 50 ms RTT; WAN rows run on two GCP VMs across US regions (~64 ms RTT). [Full methodology](testing/benchmarks/METHODOLOGY.md).
 
 | # | Workload | Baseline | quicrtc | Result |
 |---|---|---|---|---|
@@ -50,9 +43,7 @@ Head-to-head: same workload, same machine, same network. Lower is better. Loopba
 | 5 | [Computer-use action→DOM RTT — real WAN](testing/wan_bench/computer_use.go) | TCP-multiplexed channels: p50 **63 ms**, p99 **157 ms** | quicrtc: p50 **65 ms**, p99 **80 ms** | **~2× faster at the tail** |
 | 6 | [1-to-many broadcast (4 viewers)](testing/benchmarks/fanout/live_broadcast_test.go) | pion SFU re-encoded per hop: worst viewer p99 **8.42 ms** | native relay: worst viewer p99 **4.62 ms** | **~1.8× lower tail** |
 
-**Row 4 is the headline:** tokens ride a separate lane, so a 60 Mbps video burst doesn't drag their tail.
-
-**Where it doesn't win:** a single token stream alone on a clean connection (HTTP/2 SSE is ~20% faster at the median — lanes only pay off when you have multiple things to keep apart), browser-to-browser (use WebRTC), conversational voice that needs the browser's audio cleanup (use WebRTC), and native iOS/Android (no port yet).
+**Where it doesn't win:** a single token stream on a clean connection — HTTP/2 SSE beats it ~20% at the median, and one stream has nothing to isolate. Browser-to-browser (use WebRTC). Conversational voice that needs the browser's audio cleanup (use WebRTC). Native iOS/Android (no port yet).
 
 ## Install
 
@@ -65,7 +56,7 @@ Requires Go 1.26+, Node 18+, and a browser with WebTransport (Chrome/Edge 114+, 
 
 ## Quick start
 
-**Server (Go)** — publish each kind of data on its own lane:
+**Server (Go)** — one publisher per kind:
 
 ```go
 srv, _ := server.New(server.Config{
@@ -84,7 +75,7 @@ for token := range llm.Tokens() {
 }
 ```
 
-**Client (TypeScript)** — subscribe to the lanes you care about:
+**Client (TypeScript)** — subscribe to the lanes you want:
 
 ```typescript
 import { QuicRTCClient } from 'quicrtc';
@@ -98,26 +89,22 @@ const tokens = await client.recvOn('reasoning');
 console.log(new TextDecoder().decode(tokens.bytes));
 ```
 
-Runnable: [`examples/publisher/`](examples/publisher/) (server) and [`ts-sdk/examples/viewer/`](ts-sdk/examples/viewer/) (a browser viewer that drives all four lanes at once). More — a real computer-use loop, the native relay, a session-replay scrubber — in [`examples/`](examples/) and [`ts-sdk/examples/`](ts-sdk/examples/). Deploying? See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Stuck? [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+Runnable: [`examples/publisher/`](examples/publisher/) (server) and [`ts-sdk/examples/viewer/`](ts-sdk/examples/viewer/) (a browser viewer driving all four lanes at once). A real Claude computer-use loop lives in [`examples/cua-live/`](examples/cua-live/) (`go run . -fake`, zero setup); the native relay and a session-replay scrubber are in [`examples/`](examples/) and [`ts-sdk/examples/`](ts-sdk/examples/). Deploying? See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Stuck? [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
 ## FAQ
 
 **How is this different from WebRTC / WebSockets?** A WebSocket is one queue, so different kinds of traffic stall each other. WebRTC is built for browser-to-browser and for voice/video that needs the browser's audio cleanup — the right tool for Zoom or conversational voice. quicrtc is for one server pushing many kinds of data to a client on a single connection.
 
-**Is it production-ready?** The wire format is stable, cross-language tested, and the benchmark numbers reproduce on real GCP VMs. It's a solo open-source project with no known third-party deployments — vet it like any new dependency.
+**Is it production-ready?** The wire format is stable, cross-language tested, and the benchmark numbers reproduce on real GCP VMs.
 
-**Browser-to-browser?** No — browsers can only initiate WebTransport, not accept it. Use WebRTC.
+**Does this support browser p2p?** No — browsers can only initiate WebTransport, not accept it. Use WebRTC.
 
-**How does it relate to Media over QUIC (MoQ)?** Not MoQ-compatible. The stream-per-GOP pattern is inspired by MoQ-lite's group-as-stream model, but quicrtc is shaped for AI-agent traffic rather than MoQ's "replace HLS and WebRTC" scope. Use MoQ if you need MoQ interop.
-
-## Status
-
-**v1.0.2.** Wire format stable across Go and TypeScript (v0.1 clients connect to v1.0.2 servers unchanged); public Go API committed. Missing: native iOS/Android and known production deployments.
-
-Docs: [architecture](docs/architecture.md) · [wire spec](docs/SPEC.MD) · [auth](docs/auth.md) · [changelog](docs/CHANGELOG.md) · [issues](https://github.com/sachinkesiraju/quicrtc/issues)
+**How does it relate to Media over QUIC (MoQ)?** Not MoQ-compatible, by choice. quicrtc runs its own small wire format — a 17-byte feed frame, a datagram envelope, and a handful of control frames — with four delivery classes tuned to agent traffic. It borrows MoQ-lite's group-as-stream idea for video but skips MoQT itself: that object-and-catalog model is built for media delivery at scale and doesn't fit RPC-shaped tool calls or datagram telemetry.
 
 ## Contributing & license
 
-PRs welcome — see [`docs/CONTRIBUTING.md`](docs/CONTRIBUTING.md). Security issues: [`docs/SECURITY.md`](docs/SECURITY.md). Apache 2.0; see [`LICENSE`](LICENSE).
+PRs welcome — see [CONTRIBUTING](docs/CONTRIBUTING.md). Security issues: [SECURITY](docs/SECURITY.md). Apache 2.0; see [`LICENSE`](LICENSE).
+
+Docs: [architecture](docs/architecture.md) · [wire spec](docs/SPEC.MD) · [auth](docs/auth.md) · [changelog](docs/CHANGELOG.md) · [issues](https://github.com/sachinkesiraju/quicrtc/issues)
 
 Stream-per-GOP pattern inspired by IETF [MoQ-lite](https://datatracker.ietf.org/doc/draft-ietf-moq-transport/) (not wire-compatible). Built on [`quic-go`](https://github.com/quic-go/quic-go); WebRTC baselines use [pion](https://github.com/pion/webrtc).

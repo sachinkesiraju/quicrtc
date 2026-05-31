@@ -5,17 +5,15 @@
 [![npm version](https://img.shields.io/npm/v/quicrtc.svg)](https://www.npmjs.com/package/quicrtc)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**One QUIC/WebTransport connection that carries everything an AI agent sends to a user — screen video, LLM tokens, tool calls, telemetry — on separate lanes that don't block each other.**
+**Real-time transport for AI agent sessions over QUIC/WebTransport.**
 
-<p align="center"><img src="docs/assets/before_after.svg" alt="Today's stack glues WebRTC, SSE, gRPC, and OTLP together as four separate connections. quicrtc carries all four on one QUIC connection with isolated lanes." width="760"></p>
+quicrtc is a Go library and TypeScript SDK designed for the traffic shape that modern AI agents produce. It streams video, low-latency tokens, RPC-shaped tool calls, and fire-and-forget telemetry over a single QUIC/WebTransport connection.
 
-## The problem
+## One connection, four lanes
 
-An AI agent sends a user several kinds of data at once: live screen video, the model's tokens, tool calls, and telemetry. The usual way to ship that is four separate protocols — **WebRTC** for video, **SSE** for tokens, **gRPC** for tool calls, **OTLP** for telemetry. Four connections, four handshakes, four auth paths, four things to reconnect.
+An AI agent sends a user several kinds of data at once: live screen video, the model's tokens, tool calls, and telemetry. The usual way to ship that is four separate protocols — WebRTC for video, SSE for tokens, gRPC for tool calls, OTLP for telemetry. Four connections, four handshakes, four auth paths, four things to reconnect.
 
 quicrtc carries all four on **one** connection. Each kind of traffic gets its own lane, and a busy lane never blocks the others.
-
-## How it works — four lanes, one connection
 
 <p align="center"><img src="docs/assets/cua_flow.svg" alt="One QUIC connection carrying four parallel lanes during a computer-use agent turn: continuous screen video, the per-turn action request and result, and small snapshot datagrams." width="880"></p>
 
@@ -26,21 +24,15 @@ quicrtc carries all four on **one** connection. Each kind of traffic gets its ow
 | 🟧 **Tool calls** | each turn's action + result | a bidirectional stream per call | calls run in **parallel** |
 | ⬜ **Telemetry** | small fire-and-forget snapshots | QUIC datagrams | metrics **skip the queue** entirely |
 
-One connection means **one handshake, one auth check, and a one-round-trip reconnect** after a network change.
+### vs. the glued stack
 
-See it live — the built-in browser viewer drives all four lanes at once ([`ts-sdk/examples/viewer/`](ts-sdk/examples/viewer/) + [`examples/agent_pubsub`](examples/agent_pubsub/)):
-
-<p align="center"><img src="docs/assets/viewer.png" alt="quicrtc browser viewer showing live video, token stream, tool calls, and a datagram counter on one connection." width="880"></p>
-
-## quicrtc vs. the glued stack
+The four-protocol stack costs you on everything the lanes table doesn't show:
 
 | | WebRTC + SSE + gRPC + OTLP | quicrtc |
 |---|---|---|
 | Connections to manage | 4 | **1** |
 | Handshake + auth | 4× | **1×** |
 | Reconnect after a drop | 3 round-trips | **1** |
-| Video loss recovery | ~1–2 s | **~33 ms** (one frame) |
-| Tokens during a 60 Mbps video burst | stall behind video | **keep flowing** |
 | 1-to-many fanout | SFU re-encodes per hop | **native relay forwards bytes as-is** |
 | Browser client size | heavy | **~6 KB gzipped** (~20 KB minified) |
 | Session recording / replay | bolt on a 5th system | **built in, on one capture clock** |
@@ -106,7 +98,7 @@ const tokens = await client.recvOn('reasoning');
 console.log(new TextDecoder().decode(tokens.bytes));
 ```
 
-Runnable: [`examples/publisher/`](examples/publisher/) (server) and [`ts-sdk/examples/viewer/`](ts-sdk/examples/viewer/) (browser). Deploying? See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Stuck? [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+Runnable: [`examples/publisher/`](examples/publisher/) (server) and [`ts-sdk/examples/viewer/`](ts-sdk/examples/viewer/) (a browser viewer that drives all four lanes at once). Deploying? See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Stuck? [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
 ## Examples
 

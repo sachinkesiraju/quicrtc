@@ -58,14 +58,13 @@ as a `client.Client` and forwards AUs through its local broadcaster:
 no parse/re-encode, just splice forwarding. Subscribers can't tell
 they're talking to a relay vs a direct publisher.
 
-The broadcaster (`pubsub.Broadcaster`) also exposes an interceptor
+The broadcaster (`pubsub.Broadcaster`) exposes an interceptor
 chain. Functions registered via `AddInterceptor` see every AU
 before fanout and may transform it, drop it (return `ErrDropAU`),
-or pass it through. This is the substrate session recording
-(`record/`), per-track auth filtering, and metrics export build on.
-The chain runs at the top of `Publish` before the size-cap
-re-check, so an interceptor that grows `au.Bytes` cannot bypass
-the 16 MiB ceiling.
+or pass it through. Session recording (`record/`), per-track auth
+filtering, and metrics export build on this. The chain runs at the
+top of `Publish` before the size-cap re-check, so an interceptor that
+grows `au.Bytes` cannot bypass the 16 MiB ceiling.
 
 ## Delivery classes
 

@@ -52,7 +52,7 @@ gcloud compute firewall-rules delete quicrtc-bench-allow --quiet
 
 ## Multi-region testing
 
-The top-level `wan-bench.sh` orchestrator simplifies multi-region testing:
+The top-level `wan-bench.sh` orchestrator handles multi-region testing:
 
 ```bash
 # Single region pair (default us-east1 ↔ us-west1)

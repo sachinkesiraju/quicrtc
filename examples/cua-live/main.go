@@ -1,8 +1,8 @@
-// cua-live/main — a real, runnable computer-use agent demo over quicrtc.
+// cua-live/main — a runnable computer-use agent demo over quicrtc.
 //
 // An agent loop drives a Brain (scripted -fake, or Claude computer-use
-// -live) and fans each turn's output onto FOUR quicrtc tracks carried
-// on ONE QUIC connection to the browser viewer:
+// -live) and fans each turn's output onto four quicrtc tracks carried
+// on one QUIC connection to the browser viewer:
 //
 //	screen     KindVideo      real PNG screenshots, stream-per-GOP
 //	reasoning  KindTokens     the model's thoughts, token-by-token
@@ -11,9 +11,9 @@
 //
 // Modes:
 //
-//	-fake   scripted Brain + synthesized frames. ZERO external runtime
+//	-fake   scripted Brain + synthesized frames. No external runtime
 //	        deps: no Chrome, no API key, no network. Runs anywhere.
-//	        Proves the transport carries real agent-SHAPED traffic.
+//	        Exercises the transport with agent-shaped traffic.
 //
 //	-live   Claude computer-use over raw net/http driving a real
 //	        Chromium via chromedp. Requires ANTHROPIC_API_KEY + a Chrome
@@ -114,7 +114,7 @@ func main() {
 
 	// Stand up the server. SDP advertises image/png at our screen
 	// dimensions — the screen track ships real PNG bytes, so the codec
-	// claim is honest and the viewer decodes + draws actual pixels.
+	// claim matches what the viewer decodes and draws.
 	host, _, _ := net.SplitHostPort(*bind)
 	if host == "" {
 		host = "127.0.0.1"
@@ -223,8 +223,8 @@ func (f *fakeScreen) Frame(_ context.Context, step int, act Action, keyframe boo
 	return f.fb.Frame(step, act, keyframe)
 }
 
-// agentLoop is the heart of the demo: it walks the Brain step by step
-// and fans each turn onto the right lane.
+// agentLoop walks the Brain step by step and fans each turn onto the
+// right lane.
 type agentLoop struct {
 	brain  Brain
 	screen screenSource

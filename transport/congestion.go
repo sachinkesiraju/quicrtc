@@ -34,11 +34,10 @@ type CongestionState interface {
 	SendBufferAvailable() uint64
 }
 
-// SendRateMeter is a small sliding-window rate counter used by
-// connection adapters to derive EstimatedSendBandwidth() without
-// asking the underlying transport (which typically doesn't expose
-// it). Add bytes after each successful send; Rate returns the
-// trailing-window average.
+// SendRateMeter is a sliding-window rate counter used by connection
+// adapters to derive EstimatedSendBandwidth() without asking the
+// underlying transport (which typically doesn't expose it). Add bytes
+// after each successful send; Rate returns the trailing-window average.
 //
 // Not safe for concurrent Add: wrap with the caller's per-stream
 // lock if multiple goroutines write. Rate is safe to call from any

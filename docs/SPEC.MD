@@ -1,7 +1,7 @@
 # Wire format, version 1
 
-The on-the-wire protocol that quicrtc speaks. Any-language
-implementations can interop by following this document.
+The on-the-wire protocol quicrtc speaks. Any-language implementations
+can interop by following this document.
 
 Frames on the wire today: `0x01 HELLO`, `0x02 SDP`, `0x03/0x04
 PING/PONG`, `0x05 ERROR`, `0x06 CLOSE`, `0x07 DATA`, `0x09 SUBSCRIBE`,

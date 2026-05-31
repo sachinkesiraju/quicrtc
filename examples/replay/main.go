@@ -249,11 +249,11 @@ func keyframeMark(kf bool) string {
 	return "."
 }
 
-// generateSample writes a small, believable computer-use session to path
-// so the replay tooling can be tried without a real recording: a login
-// task with screen frames interleaved with reasoning tokens, tool calls,
-// and a couple of telemetry beats. Small sleeps give the frames distinct
-// capture timestamps so the merged timeline reads naturally.
+// generateSample writes a small computer-use session to path so the
+// replay tooling can be tried without a real recording: a login task
+// with screen frames interleaved with reasoning tokens, tool calls,
+// and a couple of telemetry beats. Small sleeps give the frames
+// distinct capture timestamps so the merged timeline reads naturally.
 func generateSample(path string) {
 	rec, err := record.NewFileRecorder(path)
 	if err != nil {

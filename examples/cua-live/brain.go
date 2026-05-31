@@ -1,6 +1,6 @@
-// cua-live — a REAL, runnable computer-use agent whose screen,
-// reasoning, tool calls, and telemetry stream through four quicrtc
-// tracks on ONE QUIC connection to the browser viewer.
+// cua-live — a runnable computer-use agent whose screen, reasoning,
+// tool calls, and telemetry stream through four quicrtc tracks on one
+// QUIC connection to the browser viewer.
 //
 // This file defines the transport-agnostic agent contract. The agent
 // loop in main.go drives a Brain step by step and fans each step's
@@ -17,10 +17,10 @@
 //
 // Two Brain implementations ship:
 //
-//   - FakeBrain (-fake): a scripted session that needs NO API key, NO
-//     Chrome, and NO network. It synthesizes screen frames and replays
-//     a believable reasoning + action sequence so the whole demo runs
-//     end-to-end anywhere and PROVES the transport wiring.
+//   - FakeBrain (-fake): a scripted session that needs no API key, no
+//     Chrome, and no network. It synthesizes screen frames and replays
+//     a reasoning + action sequence so the demo runs end-to-end
+//     anywhere and exercises the transport wiring.
 //
 //   - liveBrain (-live, build tag `cualive`): calls Claude's computer-
 //     use API over raw net/http and drives a real Chromium via
@@ -102,12 +102,12 @@ type Action struct {
 	WaitMS int `json:"wait_ms,omitempty"`
 }
 
-// Step is the full result of one Brain turn. The agent loop fans each
-// field onto its own track:
+// Step is the result of one Brain turn. The agent loop fans each field
+// onto its own track:
 //
 //	Reasoning → reasoning (tokens), token by token
 //	Action    → toolcalls (one bidi-per-call AU)
-//	Screenshot is produced AFTER the action executes and goes on screen.
+//	Screenshot is produced after the action executes and goes on screen.
 type Step struct {
 	// Reasoning is the model's natural-language thought for this turn.
 	// Streamed token-by-token on the reasoning track so the viewer's

@@ -47,7 +47,7 @@ picks the right wire pattern per modality:
 ```
 
 A big screen frame in flight cannot stall the next reasoning token —
-that lane isolation is the whole point of carrying all four on one
+that lane isolation is the point of carrying all four on one
 connection instead of gluing together WebRTC + SSE + gRPC + OTLP.
 
 ## Run the no-deps demo (`-fake`)

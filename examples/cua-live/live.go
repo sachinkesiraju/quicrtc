@@ -1,12 +1,12 @@
 //go:build cualive
 
-// live.go is the REAL computer-use Brain: it calls Claude's
+// live.go is the live computer-use Brain: it calls Claude's
 // computer-use API over raw net/http (no third-party SDK) and drives a
 // real Chromium via github.com/chromedp/chromedp for screenshots and
 // action execution.
 //
 // It is behind the `cualive` build tag so the default build — and the
-// -fake demo — compile and run with ZERO external dependencies. Build
+// -fake demo — compile and run with no external dependencies. Build
 // and run live mode with:
 //
 //	go build -tags cualive ./examples/cua-live

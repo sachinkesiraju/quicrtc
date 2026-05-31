@@ -18,10 +18,10 @@ you get:
 - a prominent **per-lane "last update age" + FREEZE badge** so a stall is
   obvious at a glance.
 
-The teaching point: under a screen burst that saturates the link, pane A's
-small lanes (`a11y`/`dom`/`perf`) queue behind screen bytes on the single
-stream and the freeze badge goes **red**, while pane B's lanes ride their own
-streams / datagrams and keep flowing green.
+Under a screen burst that saturates the link, pane A's small lanes
+(`a11y`/`dom`/`perf`) queue behind screen bytes on the single stream and the
+freeze badge goes **red**, while pane B's lanes ride their own streams /
+datagrams and keep flowing green.
 
 This page uses **only** the public TypeScript SDK
 (`QuicRTCClient.connect / onTrack / sendDatagram / receiveDatagram /

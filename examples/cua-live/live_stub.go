@@ -8,7 +8,7 @@ import "errors"
 // drives Chromium via chromedp and calls Claude's computer-use API
 // lives in live.go behind the `cualive` build tag, so the default
 // `go build ./examples/cua-live/...` (and the -fake demo) compile and
-// run with ZERO external dependencies — no chromedp, no Chrome, no
+// run with no external dependencies — no chromedp, no Chrome, no
 // network.
 //
 // To use -live, build with the tag:

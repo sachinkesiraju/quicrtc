@@ -58,7 +58,7 @@ stream {
 
 ### Relay for 1:N Fan-Out
 
-For large-scale broadcasts, use the native relay to offload the origin publisher and distribute geographically:
+For large-scale broadcasts, the native relay offloads the origin publisher and distributes geographically:
 
 ```
 Publisher → Relay Server → Multiple Downstream Servers → Subscribers
@@ -183,8 +183,6 @@ quicrtc currently ships with tuned defaults (receive windows 4/16 MiB per-stream
 
 ### Key Metrics
 
-Monitor these metrics to understand system health:
-
 | Metric | Type | Question it answers |
 |--------|------|---------------------|
 | `connections_total` | Counter | Total connections established |
@@ -263,7 +261,7 @@ Set up alerts for:
 
 ### Authentication in Production
 
-Never use the auto-generated slug in production. Use `AuthValidator` with proper JWT verification, short-lived tokens (5-15 min expiry) plus a refresh mechanism, and ensure the validator returns non-empty tenant IDs for isolation.
+Never use the auto-generated slug in production. Use `AuthValidator` with JWT verification, short-lived tokens (5-15 min expiry) plus a refresh mechanism, and return non-empty tenant IDs for isolation.
 
 ```go
 AuthValidator: func(credential string) (tenant string, err error) {
@@ -314,8 +312,6 @@ if err := srv.Shutdown(drainCtx); err != nil {
 For readiness probes, poll `srv.IsDraining()` and return non-200 while draining so the LB stops routing new connections to this instance.
 
 ### Health Checks
-
-Implement health check endpoints:
 
 ```go
 http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

@@ -1,6 +1,6 @@
 // Package server is the high-level quicrtc HTTP/3 + WebTransport
 // listener. It binds the wire/feed/session/cert pieces together and
-// exposes a simple Publisher handle for the consumer's encoder loop.
+// exposes a Publisher handle for the consumer's encoder loop.
 //
 // One server = one publisher, many subscribers. For multi-upstream
 // fan-out (one server aggregating from N publishers, or relay
@@ -502,8 +502,8 @@ func New(cfg Config) (*Server, error) {
 	return s, nil
 }
 
-// TrackSpec is the modern entry point for AddTrack. All fields except
-// Name are optional; zero values pick safe defaults (KindVideo at
+// TrackSpec describes a track for AddTrackSpec. All fields except
+// Name are optional; zero values pick defaults (KindVideo at
 // priority 4 with no trackID). The Kind field is what unlocks the
 // per-kind delivery dispatch in feed.Pump — without it, the track
 // falls through to the legacy stream-per-GOP path regardless of

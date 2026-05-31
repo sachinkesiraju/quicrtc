@@ -16,7 +16,7 @@ import (
 // multi-hour recording without loading it all. Payloads are read
 // lazily on demand via ReadPayload.
 //
-// The strategic value over the streaming Replayer is alignment: every
+// The value over the streaming Replayer is alignment: every
 // track is stamped on one capture clock, so SeekSnapshot can answer
 // "what was on screen, what had the model just said, and what tool did
 // it just call at moment t" — the three things you want when an agent

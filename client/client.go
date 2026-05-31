@@ -878,8 +878,8 @@ func (p *peekedReader) Read(b []byte) (int, error) {
 		}
 		b[0] = p.first
 		p.consumed = true
-		// Don't read more this call; one byte at a time keeps this
-		// dirt-simple and io.ReadFull will call us again as needed.
+		// Return only the peeked byte; io.ReadFull calls us again for
+		// the rest.
 		return 1, nil
 	}
 	return p.rest.Read(b)

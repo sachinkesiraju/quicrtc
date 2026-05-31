@@ -8,19 +8,19 @@ import (
 	"sync"
 )
 
-// FakeBrain is a scripted Brain that needs NO API key, NO Chrome, and
-// NO network. It replays a believable computer-use session (a model
-// working through a login + dashboard task) and synthesizes its own
-// screen frames so the whole demo runs end-to-end locally. The point
-// is to PROVE the transport wiring carries real agent-SHAPED traffic
-// — reasoning tokens, RPC-shaped tool calls, and screen frames on
-// their own lanes — without any external dependency.
+// FakeBrain is a scripted Brain that needs no API key, no Chrome, and
+// no network. It replays a computer-use session (a model working
+// through a login + dashboard task) and synthesizes its own screen
+// frames so the demo runs end-to-end locally. This exercises the
+// transport wiring with agent-shaped traffic — reasoning tokens,
+// RPC-shaped tool calls, and screen frames on their own lanes —
+// without any external dependency.
 //
-// The synthesized screen frames are honest PNGs (so the viewer renders
-// real pixels, and the SDP's "image/png" codec claim is true). Each
-// frame paints a stylized "browser window" whose visible content
-// matches the step's action — a click target highlights, typed text
-// appears in a field — so a viewer SEES the scripted session progress.
+// The synthesized screen frames are real PNGs, so the viewer renders
+// actual pixels and the SDP's "image/png" codec claim holds. Each
+// frame paints a stylized "browser window" whose content matches the
+// step's action (a click target highlights, typed text appears in a
+// field) so the screen lane visibly tracks the session.
 type FakeBrain struct {
 	w, h   int
 	script []Step
@@ -98,13 +98,13 @@ func (p *pngBuffer) Write(b []byte) (int, error) {
 }
 
 // fakeScript is the hardcoded computer-use session the fake brain
-// replays. Each entry is one turn: a model thought plus the action it
-// decided to take. The sequence is a realistic CUA flow — open the
-// site, log in, navigate, read a value, finish.
+// replays. Each entry is one turn: a thought plus the action taken.
+// The sequence is a CUA flow — open the site, log in, navigate, read a
+// value, finish.
 //
-// HARDCODED CONTENT: the reasoning text and actions are scripted, no
-// model is running. The transport behavior (token stream cadence,
-// bidi-per-call tool calls, screen frames on a separate lane) is real.
+// The reasoning text and actions are scripted; no model is running.
+// The transport behavior (token stream cadence, bidi-per-call tool
+// calls, screen frames on a separate lane) is real.
 func fakeScript() []Step {
 	return []Step{
 		{
@@ -153,10 +153,9 @@ func fakeScript() []Step {
 
 // ── synthesized browser painter ───────────────────────────────────
 //
-// Paints a stylized browser window so the viewer sees the scripted
-// session progress visually. Not pixel-perfect Chrome — just enough
-// shape (chrome bar, address field, page body, a click highlight or a
-// typed-text caret) that the screen lane is obviously carrying
+// Paints a stylized browser window. Not pixel-perfect Chrome — just
+// enough shape (chrome bar, address field, page body, a click
+// highlight or a typed-text caret) that the screen lane carries
 // step-correlated content rather than noise.
 
 const (

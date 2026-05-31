@@ -4,8 +4,7 @@ Two layers of subscriber authentication plus one mechanism for
 trusting the server's TLS certificate. None is a session-token
 system in the JWT sense: auth happens at the HELLO handshake; once
 the session is established, TLS provides confidentiality and
-integrity. This doc covers what each layer does, when to use which,
-and what they don't protect against.
+integrity.
 
 - [The handshake credential (slug)](#the-handshake-credential-slug)
 - [Single-tenant: shared slug](#single-tenant-shared-slug)
@@ -38,8 +37,7 @@ If both are set, `AuthValidator` wins.
 
 ## Single-tenant: shared slug
 
-The simplest mode. The server holds one secret; every subscriber
-must echo it.
+The server holds one secret; every subscriber must echo it.
 
 ```go
 srv, _ := server.New(server.Config{
@@ -65,7 +63,7 @@ parses it from the URL fragment automatically:
 c, err := client.Dial(ctx, "https://host:4433/wt#slug=...&hash=...", client.Options{})
 ```
 
-The TypeScript client takes it the same way:
+The TypeScript client takes it the same way.
 
 ```typescript
 await client.connect('https://host:4433/wt', {
@@ -134,13 +132,13 @@ multi-tenant.
 
 ## Per-track authorization (PublishBack)
 
-`AuthValidator` decides who can open a session. It does not decide
-what tracks an authenticated subscriber is allowed to publish on
-once the session is open. In a single-tenant deployment this is
-fine: every authenticated subscriber is trusted. In a multi-tenant
-SaaS it isn't. A subscriber authenticated as tenant A should not
-be able to call `client.AddTrack({Name: "tenantB/private"})` and
-land AUs in tenant B's namespace.
+`AuthValidator` decides who can open a session, not which tracks an
+authenticated subscriber may publish on once the session is open. In
+a single-tenant deployment every authenticated subscriber is trusted,
+so this is fine. In a multi-tenant SaaS it isn't: a subscriber
+authenticated as tenant A should not be able to call
+`client.AddTrack({Name: "tenantB/private"})` and land AUs in tenant
+B's namespace.
 
 `server.Config.OnAnnounce`, added in v1.0.2, is the hook that
 gates inbound `TypeAnnounce` frames per track:
@@ -175,14 +173,13 @@ accumulate Announce attempts to confuse server-side accounting.
 carries a stream-header naming the track it publishes on
 (`wire.TypeStreamHeader`). Without per-track auth, the receiver
 queue is created lazily the first time the stream header (or the
-matching Announce) names a track. That created a small window
-where a subscriber could open the uni stream first, pump AUs into
-the queue, and only afterward send the Announce that
-`AuthValidator` would have rejected. With `OnAnnounce` set, the
-demuxer requires `announced=true && authorized=true` before it
-creates the receive queue. Streams naming an unauthorized or
-not-yet-announced track are dropped at the header check; no AUs
-are enqueued and no inbound state is created.
+matching Announce) names a track. That opened a window where a
+subscriber could open the uni stream first, pump AUs into the queue,
+then send the Announce that `AuthValidator` would have rejected. With
+`OnAnnounce` set, the demuxer requires `announced=true &&
+authorized=true` before it creates the receive queue. Streams naming
+an unauthorized or not-yet-announced track are dropped at the header
+check; no AUs are enqueued and no inbound state is created.
 
 **The hook is on the control-frame hot path.** `handleAnnounce`
 runs from the session goroutine; long-running work (database
@@ -206,7 +203,7 @@ LAN, ephemeral certs).
 For a CA-issued cert (Let's Encrypt, internal PKI, your vendor of
 choice) point `Config.CertGetter` at a `*cert.Reloader`. The
 reloader watches the cert files on disk and picks up rotations
-without a server restart:
+without a server restart.
 
 ```go
 reloader, _ := cert.NewReloader("fullchain.pem", "privkey.pem", cert.ReloaderOptions{})

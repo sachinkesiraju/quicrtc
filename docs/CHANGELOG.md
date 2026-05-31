@@ -59,10 +59,10 @@ See `testing/wan_bench/README.md` for the table.
 
 ## [1.0.2]: Production hardening
 
-This is the 1.0 cut: the wire format, server / client / session
-APIs, and the TS SDK public surface are stable. Existing v0.1
-clients connect to v1.0.2 servers without changes; all new wire
-fields and control frames are additive and feature-gated.
+The 1.0 cut: the wire format, server / client / session APIs, and
+the TS SDK public surface are stable. Existing v0.1 clients connect
+to v1.0.2 servers without changes; all new wire fields and control
+frames are additive and feature-gated.
 
 Zero new third-party Go dependencies. The Redis-backed
 `DistributedSessionStore`, cloud recorder backends, and the

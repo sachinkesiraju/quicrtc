@@ -1,7 +1,7 @@
 # examples
 
-End-to-end examples for the Go server + client APIs. Read in order —
-each builds on the previous.
+End-to-end examples for the Go server + client APIs. Each builds on the
+previous; read in order.
 
 ## Examples (reading order)
 
@@ -38,8 +38,8 @@ ts-sdk/examples/viewer — paste
 the share URL and it renders the right panel per announced track
 (canvas + K/P overlay for video, text stream for tokens, JSON list
 for tool calls, gauges for telemetry, auto-drained datagrams). A
-"simulate slow render" checkbox triggers backpressure so you can
-watch the SDK's `onBackpressure` indicator turn yellow → red.
+"simulate slow render" checkbox triggers backpressure; the SDK's
+`onBackpressure` indicator turns yellow → red.
 
 ## Run any example
 

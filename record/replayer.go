@@ -50,10 +50,15 @@ type Frame struct {
 }
 
 // Next reads the next recorded frame. Returns io.EOF when the EOF
-// marker is reached or the file ends.
+// marker is reached, the file ends, or a torn final frame is
+// encountered (crash mid-write). In the truncation case the error
+// is still io.EOF — the recording simply ends here.
 func (r *Replayer) Next() (Frame, error) {
 	f, err := decodeFrame(r.br)
 	if err != nil {
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return Frame{}, io.EOF
+		}
 		return Frame{}, err
 	}
 	return Frame{

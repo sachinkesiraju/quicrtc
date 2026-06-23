@@ -124,6 +124,7 @@ type Client struct {
 	// "primary" too.
 	feedMu       sync.Mutex
 	tracks       map[string]chan pubsub.AccessUnit
+	trackDone    map[string]chan struct{} // closed on Unannounce; RecvOn returns io.EOF
 	remoteTracks map[string]wire.Announce // tracks the server has Announced
 	feedErr      chan error
 
@@ -255,6 +256,7 @@ func Dial(ctx context.Context, rawURL string, opts Options) (*Client, error) {
 		sessionCtx:         sessionCtx,
 		sessionCancel:      sessionCancel,
 		tracks:             map[string]chan pubsub.AccessUnit{"primary": make(chan pubsub.AccessUnit, 16)},
+		trackDone:          make(map[string]chan struct{}),
 		feedErr:            make(chan error, 1),
 		pubTracks:          make(map[string]*pubTrack),
 		requestedSessionID: opts.SessionID,
@@ -303,8 +305,10 @@ func (c *Client) Recv(ctx context.Context) (pubsub.AccessUnit, error) {
 // RecvOn blocks until the next AccessUnit on the named track arrives.
 // The first time a track name is seen — either via this call or via
 // an inbound stream-header frame — its receive queue is created.
+// Returns io.EOF if the track has been unannounced by the server.
 func (c *Client) RecvOn(ctx context.Context, trackName string) (pubsub.AccessUnit, error) {
 	ch := c.trackChan(trackName)
+	done := c.trackDoneChan(trackName)
 	select {
 	case au, ok := <-ch:
 		if !ok {
@@ -314,6 +318,8 @@ func (c *Client) RecvOn(ctx context.Context, trackName string) (pubsub.AccessUni
 		return au, nil
 	case err := <-c.feedErr:
 		return pubsub.AccessUnit{}, err
+	case <-done:
+		return pubsub.AccessUnit{}, io.EOF
 	case <-ctx.Done():
 		return pubsub.AccessUnit{}, ctx.Err()
 	case <-c.closed:
@@ -343,6 +349,19 @@ func (c *Client) trackChan(name string) chan pubsub.AccessUnit {
 	}
 	ch := make(chan pubsub.AccessUnit, 16)
 	c.tracks[name] = ch
+	return ch
+}
+
+// trackDoneChan returns (creating if needed) the done channel for a
+// named track. Closed when the server sends Unannounce for this track.
+func (c *Client) trackDoneChan(name string) <-chan struct{} {
+	c.feedMu.Lock()
+	defer c.feedMu.Unlock()
+	if ch, ok := c.trackDone[name]; ok {
+		return ch
+	}
+	ch := make(chan struct{})
+	c.trackDone[name] = ch
 	return ch
 }
 
@@ -575,6 +594,12 @@ func (u *clientUniStream) CancelWrite(code uint32) {
 	u.s.CancelWrite(webtransport.StreamErrorCode(code))
 }
 
+// Done returns a channel that is closed when the client's underlying
+// transport dies (e.g., the QUIC connection drops, the server shuts
+// down, or Close() is called). Relay pumps select on this to detect
+// upstream death and break out of their session loop for reconnect.
+func (c *Client) Done() <-chan struct{} { return c.closed }
+
 // Close ends the session.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
@@ -722,17 +747,18 @@ func (c *Client) handleRemoteAnnounce(a wire.Announce) {
 }
 
 // handleRemoteUnannounce removes the named track from the client's
-// active set. The recv channel is NOT closed: any drainFeed goroutine
-// still running for an in-flight stream of this track would race on
-// send-to-closed-channel. The associated QUIC stream is cancelled by
-// the server, so drainFeed will exit on its next ReadFeedFrame error.
-//
-// RecvOn callers blocked on the old channel will see no further AUs
-// and should rely on context cancellation to unblock; a future Phase
-// 4 enhancement can deliver an explicit io.EOF via a sentinel value.
+// active set and closes the track's done channel so any blocked
+// RecvOn returns io.EOF. The recv channel itself is NOT closed:
+// drainFeed goroutines may still be writing into it from an
+// in-flight stream. The done channel is safe to close because
+// only this path ever closes it (guarded by delete-from-map).
 func (c *Client) handleRemoteUnannounce(u wire.Unannounce) {
 	c.feedMu.Lock()
 	delete(c.tracks, u.Name)
+	if done, ok := c.trackDone[u.Name]; ok {
+		close(done)
+		delete(c.trackDone, u.Name)
+	}
 	if c.remoteTracks != nil {
 		delete(c.remoteTracks, u.Name)
 	}

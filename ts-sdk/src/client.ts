@@ -1013,6 +1013,15 @@ export class QuicRTCClient {
             case FrameType.Error:
               throw new ClientError(`server error: ${this.formatServerError(payload)}`, 'server_error');
             case FrameType.Close:
+              // Server is draining (e.g., graceful shutdown in a
+              // multi-instance deployment). With reconnect enabled,
+              // tear down this connection but schedule a reconnect
+              // so the client fails over to another instance.
+              if (this.reconnectEnabled()) {
+                await this.teardownTransport();
+                this.scheduleReconnect();
+                return;
+              }
               await this.close();
               return;
             default:
@@ -1295,6 +1304,34 @@ export class QuicRTCClient {
         // Already handled in doConnect (errored out → state error).
       }
     }, backoff);
+  }
+
+  /**
+   * teardownTransport tears down the current WebTransport session and
+   * its read loops WITHOUT permanently closing the client. Used when
+   * the server sends TypeClose (drain) and reconnect is enabled: the
+   * client should fail over to another instance, not stop entirely.
+   */
+  private async teardownTransport(): Promise<void> {
+    this.abortController.abort();
+    if (this.datagramReader) {
+      try { await this.datagramReader.cancel(); } catch { /* ignore */ }
+      this.datagramReader = undefined;
+    }
+    if (this.controlReader) {
+      try { await this.controlReader.cancel('drain-close'); } catch { /* ignore */ }
+    }
+    if (this.controlWriter) {
+      try { await this.controlWriter.close(); } catch { /* ignore */ }
+    }
+    if (this.transport) {
+      try { await this.transport.close(); } catch { /* ignore */ }
+    }
+    this.transport = undefined;
+    this.controlReader = undefined;
+    this.controlWriter = undefined;
+    this.abortController = new AbortController();
+    this.setConnectionState(ConnectionState.Disconnected);
   }
 
   private cancelReconnect(): void {

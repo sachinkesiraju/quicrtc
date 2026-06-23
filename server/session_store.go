@@ -28,6 +28,15 @@ import (
 
 const defaultResumeWindow = 60 * time.Second
 
+// defaultMaxParked caps how many parked sessions the in-memory store
+// holds at once. Without a cap, a client holding the shared slug could
+// connect/disconnect in a loop and accumulate parked receivers faster
+// than the TTL reclaims them — every parked receiver adds a fanout
+// stop on the broadcaster's Publish path and pins buffered AU memory.
+// On overflow the oldest-expiring entry is evicted (its onEvict runs,
+// unsubscribing its receivers).
+const defaultMaxParked = 1024
+
 // SessionStore is the pluggable backend that holds parked session
 // state across socket disconnects. The default in-memory impl is
 // sufficient for single-instance deployments; production multi-
@@ -105,7 +114,11 @@ type ClosableStore interface {
 //   - LookupInstance lets the server's /wt handler answer "where does
 //     this session live now?" before the WebTransport upgrade hijacks
 //     the response. That hand-off point is the only place an HTTP
-//     redirect can still be issued.
+//     redirect can still be issued. NOTE: browser WebTransport cannot
+//     follow redirects (the API fails on any non-2xx), so clients in
+//     multi-instance deployments should probe GET /locate?session=<id>
+//     over plain HTTPS first and dial the returned instance directly;
+//     the 307 path only helps custom clients that opt into following it.
 //   - RegisterInstance announces this server's reachable address so
 //     other instances' LookupInstance calls can return it.
 type DistributedSessionStore interface {
@@ -130,17 +143,31 @@ type memorySessionStore struct {
 	mu        sync.Mutex
 	byID      map[string]*persistedSession
 	resumeTTL time.Duration
+	maxParked int
 }
 
 // NewMemorySessionStore returns the default in-memory SessionStore.
-// Equivalent to passing nil to server.Config.SessionStore.
+// Equivalent to passing nil to server.Config.SessionStore. Holds at
+// most defaultMaxParked entries; see NewMemorySessionStoreWithCap.
 func NewMemorySessionStore(ttl time.Duration) SessionStore {
+	return NewMemorySessionStoreWithCap(ttl, defaultMaxParked)
+}
+
+// NewMemorySessionStoreWithCap is NewMemorySessionStore with an
+// explicit cap on concurrently-parked sessions. When a Park would
+// exceed the cap, the entry closest to expiry is evicted first (its
+// onEvict callback runs). maxParked <= 0 picks defaultMaxParked.
+func NewMemorySessionStoreWithCap(ttl time.Duration, maxParked int) SessionStore {
 	if ttl <= 0 {
 		ttl = defaultResumeWindow
+	}
+	if maxParked <= 0 {
+		maxParked = defaultMaxParked
 	}
 	return &memorySessionStore{
 		byID:      make(map[string]*persistedSession),
 		resumeTTL: ttl,
+		maxParked: maxParked,
 	}
 }
 
@@ -170,6 +197,23 @@ func (s *memorySessionStore) Park(tenant, sessionID string, receivers map[string
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.evictExpiredLocked(time.Now())
+	// Enforce the parked-entry cap: evict the soonest-expiring entries
+	// until there is room. Bounds both broadcaster fanout cost and the
+	// AU memory pinned by parked receivers when a client churns
+	// connect/disconnect faster than the TTL reclaims entries.
+	for s.maxParked > 0 && len(s.byID) >= s.maxParked {
+		var oldestKey string
+		var oldest *persistedSession
+		for k, p := range s.byID {
+			if oldest == nil || p.expiresAt.Before(oldest.expiresAt) {
+				oldestKey, oldest = k, p
+			}
+		}
+		delete(s.byID, oldestKey)
+		if oldest.onEvict != nil {
+			oldest.onEvict()
+		}
+	}
 	s.byID[scopedKey(tenant, sessionID)] = &persistedSession{
 		id:        sessionID,
 		receivers: receivers,

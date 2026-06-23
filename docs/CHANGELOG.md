@@ -6,8 +6,66 @@ versions fix bugs and tighten existing surface.
 
 ## [Unreleased]
 
-Reliability + tooling work on the `feat/cua-reliability-and-demo` branch,
-validated against real GCP cross-region WAN.
+Hardening + design-hole fixes from a full-code review.
+
+### Fixed
+
+- **Idle watchdog predicate** (`session/session.go`, `feed/`) — the
+  watchdog now fires only when a feed write was *attempted* but made no
+  progress (peer stopped reading), instead of on any 60s window without
+  outbound writes. Inbound-only PublishBack sessions and quiet-but-alive
+  sessions (agent idle between responses) are no longer killed; the
+  PING-spam pinning defense is preserved (`TestPingDoesNotResetIdleTimer`).
+  Accepted inbound AUs now also count as session progress.
+- **Non-video tracks can no longer be blackholed by one queue overflow**
+  (`pubsub.Broadcaster.SetSelfContained`) — token / tool-call / telemetry /
+  audio broadcasters skip keyframe gating and evict-oldest on overflow.
+  Previously, a publisher that omitted `Keyframe: true` lost the track
+  permanently after the first full queue. Server and Go client set this
+  automatically from the track `Kind`.
+- **Video resume now delivers the spliced mid-GOP continuation**
+  (`feed.Config.AllowLeadingPFrames`) — resumed sessions with a
+  `LastSeenSeq` cursor get the in-flight P-frame run on the first stream
+  instead of stalling until the next keyframe.
+- **`transport.SendRateMeter` is actually goroutine-safe** — `Rate`
+  mutated the window head without a lock despite its doc comment;
+  both `Add` and `Rate` now serialize on an internal mutex.
+- **Malformed control frames are observable** — new
+  `session.Config.OnProtocolError` hook; the server logs a warning
+  instead of dropping bad Announce/Backpressure/KindStats JSON silently.
+- **TS SDK reconnect state bug** — the auto-reconnect path left the
+  client marked closed after resuming, breaking all API calls on the
+  new connection.
+- **README claims aligned with the code** — removed the unimplemented
+  "0-RTT resume" mechanism (reconnect is one full handshake instead of
+  three — still the real win); browser-bundle size claim now matches
+  the measured tsc output (~18 KB gzipped).
+
+### Changed
+
+- **TS SDK `reconnect` defaults to `true`** — the server parks sessions
+  and replays missed AUs, so transparent resume is the right default.
+  Set `reconnect: false` to surface every disconnect.
+- **Authenticated-peer DoS hardening**: the in-memory session store caps
+  parked sessions (default 1024, `NewMemorySessionStoreWithCap`);
+  inbound uni streams get a 30s mid-frame read deadline (first byte of
+  each frame may still wait indefinitely — sporadic tracks are legal);
+  wire-driven inbound track creation is capped at 256 per session
+  (`too_many_tracks` error). `session.UniStream` gained
+  `SetReadDeadline` (satisfied by `webtransport.ReceiveStream`).
+
+### Added
+
+- **`GET /locate?session=<id>`** — multi-instance resume routing probe.
+  Browser WebTransport cannot follow the `/wt` 307 redirect (the API
+  fails on any non-2xx), so resuming clients should probe `/locate`
+  over plain HTTPS and dial the returned instance directly.
+
+---
+
+Earlier unreleased work: reliability + tooling on the
+`feat/cua-reliability-and-demo` branch, validated against real GCP
+cross-region WAN.
 
 ### Fixed
 

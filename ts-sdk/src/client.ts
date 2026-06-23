@@ -450,7 +450,13 @@ class sendPump {
 export interface QuicRTCClientOptions {
   /** Per-track recv queue size when no consumer is reading. Default 100. */
   maxQueueSize?: number;
-  /** Enable automatic reconnect with exponential backoff. Default false. */
+  /**
+   * Automatic reconnect with exponential backoff and session resume.
+   * Default true: the server parks disconnected sessions for its
+   * resume window (60s default) and replays missed AUs on reconnect,
+   * so coming back is cheap and lossless. Set false to surface every
+   * disconnect to the application instead.
+   */
   reconnect?: boolean;
   /** Max reconnect attempts before giving up. Default 5. */
   maxRetries?: number;
@@ -511,6 +517,11 @@ export class QuicRTCClient {
   private announceCallbacks: ((track: RemoteTrack) => void)[] = [];
   private unannounceCallbacks: ((name: string) => void)[] = [];
   private kindStatsCallbacks: ((ks: KindStats) => void)[] = [];
+
+  /** Reconnect defaults ON — see QuicRTCClientOptions.reconnect. */
+  private reconnectEnabled(): boolean {
+    return this.opts.reconnect ?? true;
+  }
 
   constructor(private readonly opts: QuicRTCClientOptions = {}) {
     // Initialize closePromise eagerly so concurrent close() calls all
@@ -893,7 +904,7 @@ export class QuicRTCClient {
       this.currentRetry = 0;
     } catch (err) {
       this.setConnectionState(ConnectionState.Error);
-      if (this.opts.reconnect && !this.closed) {
+      if (this.reconnectEnabled() && !this.closed) {
         this.scheduleReconnect();
       } else {
         throw err;
@@ -1016,7 +1027,7 @@ export class QuicRTCClient {
           this.setConnectionState(ConnectionState.Error);
           // Trigger close (which will fire reconnect if enabled).
           await this.close();
-          if (this.opts.reconnect) {
+          if (this.reconnectEnabled()) {
             this.scheduleReconnect();
           }
         }
@@ -1269,8 +1280,12 @@ export class QuicRTCClient {
     this.currentRetry++;
     this.reconnectTimer = setTimeout(async () => {
       try {
-        // Reset the abort controller so the new connection's loops
-        // aren't immediately killed by the previous abort.
+        // The control-reader error path runs close() before scheduling
+        // this reconnect, which sets the closed flag; clear it so the
+        // resumed connection's API surface works again. Reset the
+        // abort controller so the new connection's loops aren't
+        // immediately killed by the previous abort.
+        this.closed = false;
         this.abortController = new AbortController();
         if (this.connectOptions && this.sessionIdValue) {
           this.connectOptions.sessionId = this.sessionIdValue;

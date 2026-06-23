@@ -11,7 +11,7 @@ quicrtc is a Go library and TypeScript SDK designed for the traffic shape that m
 
 Most agent products today glue together separate transports — SSE for LLM tokens, WebRTC for video, gRPC for tool calls, OTLP for telemetry — each with its own connection lifecycle, reconnect story, and head-of-line (HOL) behavior. quicrtc folds that stack into a single QUIC connection, and each kind of traffic gets routed the way it needs.
 
-All four tracks share QUIC's 0-RTT resume and connection migration, so reconnecting restores every workload in one round-trip instead of three handshakes.
+All four tracks share one QUIC connection, so reconnecting after a drop is a single handshake instead of three — and the session resumes with per-track replay of AUs that were in flight when the connection died.
 
 <p align="center"><img src="docs/assets/overview.svg" alt="One QUIC connection from agent server to browser/client, carrying screen video, reasoning tokens, tool calls, and telemetry." width="640"></p>
 
@@ -25,9 +25,9 @@ A track's `Kind` picks its wire shape. Video bursts and the token stream sit on 
 | ⬜ **Telemetry** | OTLP | QUIC datagrams | metrics **skip the queue** entirely |
 | **Connections** | 4 | **1** | one to open, secure, and watch |
 | **Handshake + auth** | 4× | **1×** | one login covers every lane |
-| **Reconnect after a drop** | 3 round-trips | **1** | 0-RTT resume + connection migration |
+| **Reconnect after a drop** | 3 round-trips | **1** | one handshake + session resume with replay |
 | **1-to-many fanout** | SFU re-encodes per hop | **native relay** | forwards bytes as-is, no re-encode |
-| **Browser client** | heavy | **~6 KB gzipped** | ~20 KB minified |
+| **Browser client** | heavy | **~18 KB gzipped** | zero dependencies |
 | **Recording / replay** | a 5th system | **built in** | on one capture clock |
 
 ## Performance
@@ -95,7 +95,7 @@ Runnable: [`examples/publisher/`](examples/publisher/) (server) and [`ts-sdk/exa
 
 **How is this different from WebRTC / WebSockets?** A WebSocket is one queue, so different kinds of traffic stall each other. WebRTC is built for browser-to-browser and for voice/video that needs the browser's audio cleanup — the right tool for Zoom or conversational voice. quicrtc is for one server pushing many kinds of data to a client on a single connection.
 
-**Is it production-ready?** The wire format is stable, cross-language tested, and the benchmark numbers reproduce on real GCP VMs.
+**Is it production-ready?** The wire format is stable, cross-language tested, and the benchmark numbers reproduce on real GCP VMs. For open deployments, set `MaxSessions`, `InboundRateLimit`, and a `Metrics` sink — the defaults are tuned for closed/trusted environments.
 
 **Does this support browser p2p?** No — browsers can only initiate WebTransport, not accept it. Use WebRTC.
 

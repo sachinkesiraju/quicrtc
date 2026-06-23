@@ -14,10 +14,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const distDir = join(here, '..', 'dist');
 
 const coreFiles = ['index.js', 'client.js', 'wire.js', 'types.js'];
-// Transitional limit reflecting tsc-only output (no minifier yet).
-// Tightens to 8 KiB once esbuild/rollup is wired into the build —
-// the README claim ("~6 KB gzipped") tracks minified output, not the
-// human-readable JS that tsc emits today.
+// Limit reflecting tsc-only output (no minifier yet); the README
+// claim ("~18 KB gzipped") tracks this gate. Tightens once
+// esbuild/rollup is wired into the build.
 const CORE_LIMIT_BYTES = 22 * 1024;
 
 let total = 0;

@@ -88,6 +88,14 @@ type Config struct {
 	// the wire-byte count. Optional; useful for metrics.
 	OnWriteBytes func(n int)
 
+	// OnWriteAttempt is called when the pump dequeues an AU and is
+	// about to deliver it (before the write). Paired with
+	// OnWriteBytes it lets an observer distinguish "nothing to send"
+	// (no attempts) from "writes are stuck" (attempts without
+	// successes) — the session's idle watchdog keys on exactly that
+	// distinction. Optional.
+	OnWriteAttempt func()
+
 	// TrackName, if non-empty, causes the pump to write a
 	// TypeStreamHeader frame as the first frame on each new uni
 	// stream so the receiver can route AUs to the right track. An
@@ -198,6 +206,16 @@ type Config struct {
 	// memory caps under high call rates or when responses are bounded
 	// by the application's protocol (e.g., a tool-call schema).
 	MaxBidiResponse int64
+
+	// AllowLeadingPFrames permits the stream-per-GOP pump to open its
+	// FIRST stream on a P-frame and write the leading P-frame run
+	// without a keyframe. Set only for resumed sessions where the
+	// subscriber declared a per-track continuation point
+	// (HELLO.LastSeenSeq): the subscriber already holds the GOP head,
+	// so the spliced mid-GOP P-frames are decodable continuation, not
+	// garbage. Applies to the first stream only — after any keyframe
+	// or stream failure, normal keyframe-first rules resume.
+	AllowLeadingPFrames bool
 
 	// OnBidiResponse is invoked when a bidi call completes. seq matches
 	// the AU's Seq for correlation. response holds the bytes received
@@ -353,6 +371,31 @@ func (p *Pump) scheduledDo(fn func()) {
 	<-done
 }
 
+// openGOPStream opens one uni stream and writes the multi-track
+// header. Shared by the keyframe path and the resume-continuation
+// path in runStreamGOP.
+func (p *Pump) openGOPStream(ctx context.Context) (SendStream, error) {
+	openCtx, cancel := context.WithTimeout(ctx, p.cfg.OpenDeadlineKeyframe)
+	s, err := p.opener.OpenSendStream(openCtx)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	// Write the stream header (if multi-track) before any feed
+	// frames so the receiver can demux this stream.
+	if p.cfg.TrackName != "" {
+		_ = s.SetWriteDeadline(time.Now().Add(p.cfg.WriteDeadline))
+		if err := wire.WriteStreamHeader(s, p.cfg.TrackName); err != nil {
+			s.CancelWrite(0)
+			return nil, err
+		}
+	}
+	if p.cfg.OnStreamOpened != nil {
+		p.cfg.OnStreamOpened(p.cfg.TrackName, p.cfg.Priority)
+	}
+	return s, nil
+}
+
 // runStreamGOP is the legacy per-GOP pump: one uni stream per
 // keyframe, P-frames written in-stream, prev stream RESET on next
 // keyframe. The video path; the structurally-correct choice when
@@ -364,6 +407,12 @@ func (p *Pump) runStreamGOP(ctx context.Context, recv *pubsub.Receiver) error {
 			_ = current.Close()
 		}
 	}()
+
+	// leadingAllowed permits the FIRST stream to start on a P-frame
+	// (resume continuation — see Config.AllowLeadingPFrames). Cleared
+	// once any stream is opened or any keyframe arrives: after that,
+	// a missing stream means a real gap and only a keyframe resyncs.
+	leadingAllowed := p.cfg.AllowLeadingPFrames
 
 	frames := recv.Frames()
 	for {
@@ -377,46 +426,50 @@ func (p *Pump) runStreamGOP(ctx context.Context, recv *pubsub.Receiver) error {
 			}
 			au = a
 		}
+		if p.cfg.OnWriteAttempt != nil {
+			p.cfg.OnWriteAttempt()
+		}
 
 		if au.Keyframe {
+			leadingAllowed = false
 			// Reset the previous GOP's stream so any in-flight bytes
 			// are discarded — the receiver will resync on this new
 			// keyframe regardless.
 			if current != nil {
 				current.CancelWrite(0)
 			}
-			openCtx, cancel := context.WithTimeout(ctx, p.cfg.OpenDeadlineKeyframe)
-			s, err := p.opener.OpenSendStream(openCtx)
-			cancel()
+			s, err := p.openGOPStream(ctx)
 			if err != nil {
 				current = nil
 				recv.RequestKeyframe()
 				continue
 			}
-			// Write the stream header (if multi-track) before any
-			// feed frames so the receiver can demux this stream.
-			if p.cfg.TrackName != "" {
-				_ = s.SetWriteDeadline(time.Now().Add(p.cfg.WriteDeadline))
-				if err := wire.WriteStreamHeader(s, p.cfg.TrackName); err != nil {
-					s.CancelWrite(0)
-					current = nil
-					recv.RequestKeyframe()
-					continue
-				}
-			}
-			if p.cfg.OnStreamOpened != nil {
-				p.cfg.OnStreamOpened(p.cfg.TrackName, p.cfg.Priority)
-			}
 			current = s
 		}
 
-		// P-frame without a current stream: the receiver just joined
-		// mid-GOP and the very first AU dispatched to it was a P-frame
-		// (e.g. its channel was full when a keyframe was published).
-		// We have no decodable reference; ask for a fresh keyframe.
+		// P-frame without a current stream. Two cases:
+		//
+		//   - Resume continuation (leadingAllowed): the subscriber
+		//     declared LastSeenSeq, so it holds this GOP's head and
+		//     these P-frames are decodable. Open the first stream and
+		//     write them — this is what makes resume gap-free for
+		//     video instead of stalling until the next keyframe.
+		//
+		//   - Mid-session (the common case): the receiver joined
+		//     mid-GOP or a prior frame was dropped. No decodable
+		//     reference; ask for a fresh keyframe.
 		if current == nil {
-			recv.RequestKeyframe()
-			continue
+			if !leadingAllowed {
+				recv.RequestKeyframe()
+				continue
+			}
+			leadingAllowed = false // one continuation stream only
+			s, err := p.openGOPStream(ctx)
+			if err != nil {
+				recv.RequestKeyframe()
+				continue
+			}
+			current = s
 		}
 
 		typ := wire.TypePFrame
@@ -527,6 +580,9 @@ func (p *Pump) runStreamLowLatency(ctx context.Context, recv *pubsub.Receiver) e
 				return nil
 			}
 			au = a
+		}
+		if p.cfg.OnWriteAttempt != nil {
+			p.cfg.OnWriteAttempt()
 		}
 
 		// Lazy stream re-open: if the initial open failed (or a write

@@ -92,6 +92,16 @@ type Broadcaster struct {
 	chanSize       int
 	maxAUBytes     int64 // per-AU size ceiling; 0 = unlimited
 
+	// selfContained marks this broadcaster's AUs as independently
+	// decodable (tokens, tool calls, telemetry, audio frames): there
+	// is no keyframe/P-frame dependency chain. Fanout then never
+	// gates delivery on needKeyframe — for video, skipping P-frames
+	// after a drop avoids feeding the decoder garbage, but for
+	// self-contained kinds the same gate would silently blackhole
+	// the track until an AU happened to carry Keyframe=true.
+	// Overflow policy becomes evict-oldest + enqueue (keep latest).
+	selfContained bool
+
 	// Replay ring. replayBuf is a slice grown lazily up to replayCap;
 	// once at capacity it operates as a circular buffer where
 	// replayHead is the index of the next write slot. replayBytes
@@ -188,6 +198,18 @@ func NewBroadcasterWithBytes(chanSize int, maxAUBytes int64) *Broadcaster {
 		replayCap:      DefaultReplayCap,
 		replayMaxBytes: DefaultReplayMaxBytes,
 	}
+}
+
+// SetSelfContained declares that every AU published on this
+// broadcaster is independently decodable (no keyframe/P-frame
+// dependency). Fanout stops gating delivery on needKeyframe and
+// overflow evicts the oldest buffered AU instead of dropping the new
+// one. Set it once at track-creation time, before subscribers attach;
+// the server does this automatically for non-video track kinds.
+func (b *Broadcaster) SetSelfContained(v bool) {
+	b.mu.Lock()
+	b.selfContained = v
+	b.mu.Unlock()
 }
 
 // SetReplayMaxBytes reconfigures the replay-ring byte ceiling. The
@@ -352,7 +374,11 @@ func (b *Broadcaster) subscribeWithCap(chanSize int) *Receiver {
 	if b.latestKeyframe != nil {
 		// Channel is fresh and at least size 1, so the send never blocks.
 		r.ch <- *b.latestKeyframe
-	} else {
+	} else if !b.selfContained {
+		// Video-style tracks wait for a decodable starting point.
+		// Self-contained tracks (tokens, telemetry, ...) have no such
+		// concept — gating here would blackhole them until an AU
+		// happened to carry Keyframe=true.
 		r.needKeyframe = true
 	}
 	r.mu.Unlock()
@@ -568,6 +594,7 @@ func (b *Broadcaster) Publish(au AccessUnit) {
 	for r := range b.receivers {
 		receivers = append(receivers, r)
 	}
+	selfContained := b.selfContained
 	b.mu.Unlock()
 
 	for _, r := range receivers {
@@ -575,6 +602,26 @@ func (b *Broadcaster) Publish(au AccessUnit) {
 		if r.closed {
 			// Unsubscribe ran between snapshot and now. Skip — the
 			// channel is closed and any send would panic.
+			r.mu.Unlock()
+			continue
+		}
+		if selfContained {
+			// Every AU is independently decodable: no keyframe gating,
+			// and overflow keeps the LATEST data by evicting the
+			// oldest buffered AU. Never set needKeyframe — there may
+			// never be another Keyframe-flagged AU to clear it.
+			select {
+			case r.ch <- au:
+			default:
+				select {
+				case <-r.ch:
+				default:
+				}
+				select {
+				case r.ch <- au:
+				default:
+				}
+			}
 			r.mu.Unlock()
 			continue
 		}

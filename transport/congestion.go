@@ -1,6 +1,9 @@
 package transport
 
-import "time"
+import (
+	"sync"
+	"time"
+)
 
 // CongestionState exposes the underlying QUIC connection's current
 // view of network conditions. Implementations wrap whatever the
@@ -39,10 +42,10 @@ type CongestionState interface {
 // underlying transport (which typically doesn't expose it). Add bytes
 // after each successful send; Rate returns the trailing-window average.
 //
-// Not safe for concurrent Add: wrap with the caller's per-stream
-// lock if multiple goroutines write. Rate is safe to call from any
-// goroutine.
+// Safe for concurrent use: both Add and Rate advance the window head
+// and are serialized by an internal mutex.
 type SendRateMeter struct {
+	mu           sync.Mutex
 	windowMicros int64
 	samples      []rateSample
 	head         int
@@ -72,6 +75,8 @@ func NewSendRateMeter(window time.Duration) *SendRateMeter {
 // Add records `n` bytes sent at `now`. Drops samples older than the
 // configured window from the head.
 func (m *SendRateMeter) Add(n int, now time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	t := now.UnixMicro()
 	m.samples = append(m.samples, rateSample{tMicros: t, bytes: uint32(n)})
 	m.totalBytes += uint64(n)
@@ -90,6 +95,8 @@ func (m *SendRateMeter) Add(n int, now time.Time) {
 // Rate returns the trailing-window average bytes/sec at `now`. Returns
 // 0 if no samples are in the window.
 func (m *SendRateMeter) Rate(now time.Time) uint64 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	cutoff := now.UnixMicro() - m.windowMicros
 	for m.head < len(m.samples) && m.samples[m.head].tMicros < cutoff {
 		m.totalBytes -= uint64(m.samples[m.head].bytes)

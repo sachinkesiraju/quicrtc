@@ -139,9 +139,9 @@ type Client struct {
 	// to resume (set from Options.SessionID). assignedSessionID is
 	// what the server gave us back in the SDP response — call
 	// SessionID() to read it.
-	requestedSessionID  string
-	assignedSessionID   string
-	requestedLastSeen   map[string]uint32 // sent in HELLO.LastSeenSeq on resume
+	requestedSessionID string
+	assignedSessionID  string
+	requestedLastSeen  map[string]uint32 // sent in HELLO.LastSeenSeq on resume
 
 	// seqMu guards lastSeenSeq. Each successful RecvOn updates the
 	// per-track high-water seq so the caller can read LastSeenSeq()
@@ -451,6 +451,11 @@ func (c *Client) Publish(ctx context.Context, lt track.LocalTrack) (Sender, erro
 		return &clientSender{c: c, name: name, bc: existing.bc}, nil
 	}
 	bc := pubsub.NewBroadcaster(0) // default per-subscriber buffer
+	// Mirror the server's policy: non-video kinds are independently
+	// decodable, so overflow must not gate on keyframes.
+	if lt.Kind != track.KindVideo && lt.Kind != "" {
+		bc.SetSelfContained(true)
+	}
 	pt := &pubTrack{name: name, bc: bc}
 	c.pubTracks[name] = pt
 	c.pubMu.Unlock()

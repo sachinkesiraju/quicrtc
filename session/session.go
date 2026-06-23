@@ -15,11 +15,21 @@
 //     - idle watchdog (cancels ctx if feed-write progress stalls)
 //  6. Block until any of those finish or ctx is cancelled.
 //
-// The watchdog deliberately keys on feed-write progress only, NOT
+// The watchdog deliberately keys on data-plane progress only, NOT
 // control-stream activity. Otherwise an attacker who knows the slug
 // could pin a session indefinitely by spamming PINGs while never
 // reading the feed — receiver-side flow control would block our
 // feed writes, but the heartbeat would keep the idle timer alive.
+//
+// "Progress" means: a successful outbound feed write, or an inbound
+// (PublishBack) AU accepted past the rate limiter. The watchdog fires
+// only when an outbound write has been ATTEMPTED more recently than
+// the last progress — i.e. writes are stuck, not merely absent. A
+// session with nothing to send (agent idle between responses,
+// inbound-only publishers) never trips the watchdog; a peer that
+// stops reading while we have data to deliver still does. Dead-peer
+// detection for fully-quiet sessions is the QUIC layer's idle
+// timeout, not this watchdog.
 package session
 
 import (
@@ -180,6 +190,14 @@ type Config struct {
 	// Kind without guessing from local queue depth alone, and to
 	// drive SLO-aware adaptation (a v1.x+ feature on top of this).
 	OnKindStats func(sessionID string, stats wire.KindStats)
+
+	// OnProtocolError, if non-nil, is invoked when a well-framed
+	// control frame carries a payload that fails to parse (malformed
+	// Announce/Unannounce/Backpressure/KindStats JSON). The frame is
+	// still dropped — this hook exists so protocol violations are
+	// observable instead of silent. Called from the control reader;
+	// keep it cheap.
+	OnProtocolError func(sessionID string, frameType byte, err error)
 }
 
 // ErrAuth is returned when the subscriber's HELLO slug doesn't match.
@@ -199,6 +217,24 @@ var ErrIdle = errors.New("quicrtc/session: idle timeout")
 // keepalive needs.
 const minPingInterval = time.Second
 
+// inboundFrameTimeout bounds how long the inbound drain loop waits
+// for the REMAINDER of a frame once its first byte has arrived (and
+// for the stream header on a freshly-opened stream). Gaps between
+// complete frames may be arbitrarily long — sporadic token tracks
+// are legitimate — but a peer that opens a stream and stalls mid-
+// frame gets its drain goroutine reclaimed instead of pinned forever.
+// Generous on purpose: the goal is reclamation, not latency.
+const inboundFrameTimeout = 30 * time.Second
+
+// maxInboundTracks caps how many distinct inbound (PublishBack)
+// tracks a single session can materialize from the wire. Each track
+// entry holds a 64-slot AU channel; without a cap an authenticated
+// peer could grow the map without bound by announcing (or naming in
+// stream headers) ever-new track names. 256 matches the relay's
+// MaxTracksPerUpstream default and is far above any real workload
+// (typically 1-5 tracks).
+const maxInboundTracks = 256
+
 // UniReceiver is the minimal subset of webtransport.Session needed to
 // accept inbound uni streams from a subscriber that's running
 // PublishBack. The session uses this to demux subscriber-originated
@@ -208,8 +244,12 @@ type UniReceiver interface {
 }
 
 // UniStream is the read side of an inbound uni QUIC stream.
+// SetReadDeadline lets the drain loop bound how long a half-sent
+// frame can pin its goroutine; webtransport.ReceiveStream satisfies
+// this directly.
 type UniStream interface {
 	io.Reader
+	SetReadDeadline(time.Time) error
 }
 
 // Session drives one subscriber connection. Use Run.
@@ -309,6 +349,11 @@ type Session struct {
 
 	bytesOut     atomic.Uint64
 	lastFeedNano atomic.Int64
+	// lastAttemptNano is when a pump last dequeued an AU for delivery.
+	// The idle watchdog fires only when this is newer than lastFeedNano
+	// (a write was attempted but never completed) — distinguishing
+	// "stuck" from "nothing to send".
+	lastAttemptNano atomic.Int64
 	// lastPingNano rate-limits inbound PING handling so an authenticated
 	// peer can't pin CPU by spamming PINGs. Stored as unix nanoseconds;
 	// PINGs faster than minPingInterval are silently dropped.
@@ -322,6 +367,12 @@ type Session struct {
 	runStarted bool
 	runCtx     context.Context
 	pumpDone   chan error
+	// resumedLeading marks tracks for which the resuming client sent a
+	// LastSeenSeq cursor: the client holds decoder state through that
+	// seq, so the pump may write the spliced mid-GOP P-frame run on
+	// its first stream (feed.Config.AllowLeadingPFrames). Populated
+	// during handshake before pumps start; read under trackMu.
+	resumedLeading map[string]bool
 
 	// Inbound (PublishBack) track state. Subscribers Announce a track
 	// on the bidi control stream, then open uni streams whose stream-
@@ -444,6 +495,29 @@ func (s *Session) inboundTrackChan(name string) *inboundTrack {
 	return t
 }
 
+// inboundTrackChanWire is inboundTrackChan for wire-driven creation
+// (Announce frames, stream headers). Unlike the app-driven path
+// (InboundRecv), it refuses to materialize new tracks past
+// maxInboundTracks: ok=false means the caller should reject the
+// announce / drop the stream. Existing tracks are always returned.
+func (s *Session) inboundTrackChanWire(name string) (*inboundTrack, bool) {
+	s.inboundMu.Lock()
+	defer s.inboundMu.Unlock()
+	if t, ok := s.inboundTracks[name]; ok {
+		return t, true
+	}
+	if len(s.inboundTracks) >= maxInboundTracks {
+		return nil, false
+	}
+	t := &inboundTrack{
+		name: name,
+		ch:   make(chan pubsub.AccessUnit, 64),
+		done: make(chan struct{}),
+	}
+	s.inboundTracks[name] = t
+	return t, true
+}
+
 // InboundTracks returns the names of all currently-known inbound
 // tracks. Used by transport layer to expose RemoteTracks().
 func (s *Session) InboundTracks() []string {
@@ -520,7 +594,12 @@ func (s *Session) AttachTrackWithKind(name string, kind track.Kind, recv *pubsub
 	if kind != "" {
 		tp.cfg.Delivery = track.DefaultDeliveryClass(kind)
 	}
-	tp.cfg.OnWriteBytes = withFeedHook(s.cfg.FeedConfig, s.touchFeedAndCount).OnWriteBytes
+	hooked := withFeedHook(s.cfg.FeedConfig, s.touchFeedAndCount, s.touchAttempt)
+	tp.cfg.OnWriteBytes = hooked.OnWriteBytes
+	tp.cfg.OnWriteAttempt = hooked.OnWriteAttempt
+	if s.resumedLeading[name] {
+		tp.cfg.AllowLeadingPFrames = true
+	}
 	s.tracks[name] = tp
 	started := s.runStarted
 	ctx := s.runCtx
@@ -801,6 +880,18 @@ func (s *Session) handshake(ctx context.Context) error {
 	if hello.SessionID != "" && s.OnResume != nil {
 		if receivers, ok := s.OnResume(s.Tenant, hello.SessionID, hello.LastSeenSeq); ok {
 			s.SessionID = hello.SessionID
+			// Tracks with a LastSeenSeq cursor may continue mid-GOP:
+			// the client holds decoder state through that seq, so the
+			// pump can write the spliced P-frame run on its first
+			// stream instead of stalling until the next keyframe.
+			if len(hello.LastSeenSeq) > 0 {
+				s.trackMu.Lock()
+				s.resumedLeading = make(map[string]bool, len(hello.LastSeenSeq))
+				for name := range hello.LastSeenSeq {
+					s.resumedLeading[name] = true
+				}
+				s.trackMu.Unlock()
+			}
 			for name, r := range receivers {
 				s.AttachTrack(name, r)
 			}
@@ -916,34 +1007,43 @@ func (s *Session) controlReader(ctx context.Context) error {
 			s.dc.Deliver(payload)
 		case wire.TypeAnnounce:
 			a, err := wire.UnmarshalAnnounce(payload)
-			if err == nil {
-				s.handleAnnounce(a)
+			if err != nil {
+				s.protocolError(t, err)
+				continue
 			}
+			s.handleAnnounce(a)
 		case wire.TypeUnannounce:
 			u, err := wire.UnmarshalUnannounce(payload)
-			if err == nil {
-				s.handleUnannounce(u)
+			if err != nil {
+				s.protocolError(t, err)
+				continue
 			}
+			s.handleUnannounce(u)
 		case wire.TypeKindStats:
 			if s.cfg.OnKindStats != nil {
-				if ks, err := wire.UnmarshalKindStats(payload); err == nil {
-					s.cfg.OnKindStats(s.SessionID, ks)
+				ks, err := wire.UnmarshalKindStats(payload)
+				if err != nil {
+					s.protocolError(t, err)
+					continue
 				}
+				s.cfg.OnKindStats(s.SessionID, ks)
 			}
 		case wire.TypeBackpressure:
 			bp, err := wire.UnmarshalBackpressure(payload)
-			if err == nil {
-				if bp.NeedsKeyframe && s.cfg.OnKeyframeRequest != nil {
-					// Dispatch keyframe-request to its dedicated hook
-					// first; subscribers signal NeedsKeyframe=true with
-					// Level=100, which would also trigger backpressure
-					// adaptation. Both callbacks fire so apps that wire
-					// only one of them still see the signal.
-					s.cfg.OnKeyframeRequest(s.SessionID, bp.TrackName)
-				}
-				if s.cfg.OnBackpressure != nil {
-					s.cfg.OnBackpressure(s.SessionID, bp.TrackName, bp.Level)
-				}
+			if err != nil {
+				s.protocolError(t, err)
+				continue
+			}
+			if bp.NeedsKeyframe && s.cfg.OnKeyframeRequest != nil {
+				// Dispatch keyframe-request to its dedicated hook
+				// first; subscribers signal NeedsKeyframe=true with
+				// Level=100, which would also trigger backpressure
+				// adaptation. Both callbacks fire so apps that wire
+				// only one of them still see the signal.
+				s.cfg.OnKeyframeRequest(s.SessionID, bp.TrackName)
+			}
+			if s.cfg.OnBackpressure != nil {
+				s.cfg.OnBackpressure(s.SessionID, bp.TrackName, bp.Level)
 			}
 		default:
 			// Defensive: ignore unknown types so a future protocol
@@ -975,7 +1075,10 @@ func (s *Session) handleAnnounce(a wire.Announce) {
 			// Record the announcement but leave it unauthorized so a
 			// retry would land in the same rejected state instead of
 			// silently accumulating attempts.
-			t := s.inboundTrackChan(a.Name)
+			t, ok := s.inboundTrackChanWire(a.Name)
+			if !ok {
+				return
+			}
 			s.inboundMu.Lock()
 			t.kind = a.Kind
 			t.codec = a.Codec
@@ -985,7 +1088,19 @@ func (s *Session) handleAnnounce(a wire.Announce) {
 			return
 		}
 	}
-	t := s.inboundTrackChan(a.Name)
+	t, ok := s.inboundTrackChanWire(a.Name)
+	if !ok {
+		// Per-session inbound track cap reached; reject so the peer
+		// learns instead of publishing into the void.
+		payload, mErr := wire.ErrorPayload{
+			Code:   "too_many_tracks",
+			Reason: fmt.Sprintf("inbound track cap (%d) reached", maxInboundTracks),
+		}.Marshal()
+		if mErr == nil {
+			_ = s.writer.Write(wire.TypeError, payload)
+		}
+		return
+	}
 	s.inboundMu.Lock()
 	t.kind = a.Kind
 	t.codec = a.Codec
@@ -1033,7 +1148,14 @@ func (s *Session) drainInboundStream(ctx context.Context, stream UniStream) {
 	// PeekStreamHeader returns trackName="" for legacy single-track
 	// streams; for PublishBack we always require a header (the client
 	// pump writes one). Default to "primary" if absent.
+	//
+	// The header read runs under a deadline: a peer that opens a
+	// stream and never sends a complete header would otherwise pin
+	// this goroutine until session teardown. Senders write the header
+	// immediately on stream-open, so a 30s budget is generous.
+	_ = stream.SetReadDeadline(time.Now().Add(inboundFrameTimeout))
 	trackName, firstByte, err := wire.PeekStreamHeader(stream)
+	_ = stream.SetReadDeadline(time.Time{})
 	if err != nil {
 		return
 	}
@@ -1056,9 +1178,14 @@ func (s *Session) drainInboundStream(ctx context.Context, stream UniStream) {
 			return
 		}
 	}
-	t := s.inboundTrackChan(trackName)
+	t, ok := s.inboundTrackChanWire(trackName)
+	if !ok {
+		// Inbound track cap reached and this stream names a brand-new
+		// track; drop the stream rather than materialize the queue.
+		return
+	}
 	for {
-		f, err := wire.ReadFeedFrame(src)
+		f, err := readInboundFrame(stream, src)
 		if err != nil {
 			return
 		}
@@ -1076,6 +1203,10 @@ func (s *Session) drainInboundStream(ctx context.Context, stream UniStream) {
 				continue
 			}
 		}
+		// An accepted inbound AU is session progress: inbound-only
+		// sessions (PublishBack publishers with a quiet outbound side)
+		// must not trip the idle watchdog while actively delivering.
+		s.touchFeed()
 		select {
 		case t.ch <- au:
 		case <-t.done:
@@ -1090,6 +1221,21 @@ func (s *Session) drainInboundStream(ctx context.Context, stream UniStream) {
 			}
 		}
 	}
+}
+
+// readInboundFrame reads one feed frame off an inbound stream with a
+// stall guard: the FIRST byte may take arbitrarily long (gaps between
+// AUs on sporadic tracks are legitimate), but once a frame has begun,
+// its remainder must arrive within inboundFrameTimeout. Without this,
+// a peer could pin the drain goroutine forever with a half-sent frame.
+func readInboundFrame(stream UniStream, src io.Reader) (wire.FeedFrame, error) {
+	var first [1]byte
+	if _, err := io.ReadFull(src, first[:]); err != nil {
+		return wire.FeedFrame{}, err
+	}
+	_ = stream.SetReadDeadline(time.Now().Add(inboundFrameTimeout))
+	defer func() { _ = stream.SetReadDeadline(time.Time{}) }()
+	return wire.ReadFeedFrame(&peekedReader{first: first[0], rest: src})
 }
 
 // peekedReader presents a single peeked byte followed by the rest of
@@ -1131,8 +1277,15 @@ func (s *Session) idleWatchdog(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case now := <-ticker.C:
-			last := time.Unix(0, s.lastFeedNano.Load())
-			if now.Sub(last) > s.cfg.IdleTimeout {
+			lastProgress := s.lastFeedNano.Load()
+			lastAttempt := s.lastAttemptNano.Load()
+			// Fire only when a write has been attempted more recently
+			// than the last progress AND that stall has outlived the
+			// idle budget. A session with nothing to send (no attempts
+			// newer than the last success) is quiet, not dead — the
+			// QUIC layer's own idle timeout covers vanished peers.
+			if lastAttempt > lastProgress &&
+				now.Sub(time.Unix(0, lastProgress)) > s.cfg.IdleTimeout {
 				return ErrIdle
 			}
 		}
@@ -1143,20 +1296,43 @@ func (s *Session) touchFeed() {
 	s.lastFeedNano.Store(time.Now().UnixNano())
 }
 
+// touchAttempt records that a pump dequeued an AU for delivery. See
+// idleWatchdog: attempts without subsequent progress are what "idle"
+// means.
+func (s *Session) touchAttempt() {
+	s.lastAttemptNano.Store(time.Now().UnixNano())
+}
+
+// protocolError surfaces a malformed-but-well-framed control payload
+// to the embedder. The frame is dropped either way.
+func (s *Session) protocolError(frameType byte, err error) {
+	if s.cfg.OnProtocolError != nil {
+		s.cfg.OnProtocolError(s.SessionID, frameType, err)
+	}
+}
+
 func (s *Session) touchFeedAndCount(n int) {
 	s.bytesOut.Add(uint64(n))
 	s.touchFeed()
 }
 
 // withFeedHook composes a feed.Config that calls both the
-// caller-supplied OnWriteBytes and the session's own progress hook.
-func withFeedHook(in feed.Config, sessionHook func(int)) feed.Config {
+// caller-supplied hooks and the session's own progress hooks
+// (successful-write for OnWriteBytes, dequeue for OnWriteAttempt).
+func withFeedHook(in feed.Config, writeHook func(int), attemptHook func()) feed.Config {
 	out := in
-	caller := in.OnWriteBytes
+	callerWrite := in.OnWriteBytes
 	out.OnWriteBytes = func(n int) {
-		sessionHook(n)
-		if caller != nil {
-			caller(n)
+		writeHook(n)
+		if callerWrite != nil {
+			callerWrite(n)
+		}
+	}
+	callerAttempt := in.OnWriteAttempt
+	out.OnWriteAttempt = func() {
+		attemptHook()
+		if callerAttempt != nil {
+			callerAttempt()
 		}
 	}
 	return out

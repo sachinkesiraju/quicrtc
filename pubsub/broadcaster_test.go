@@ -303,3 +303,43 @@ func TestMaxAUBytesZeroDisablesCap(t *testing.T) {
 		t.Fatal("huge AU should have been delivered when cap is disabled")
 	}
 }
+
+// TestSelfContainedSkipsKeyframeGating: a self-contained broadcaster
+// (tokens, tool calls, telemetry) never gates delivery on keyframes —
+// a queue overflow must not blackhole the track, and a fresh
+// subscriber receives AUs immediately even though none carry the
+// Keyframe flag.
+func TestSelfContainedSkipsKeyframeGating(t *testing.T) {
+	b := NewBroadcaster(2)
+	b.SetSelfContained(true)
+	r := b.Subscribe()
+	if r.NeedsKeyframe() {
+		t.Fatal("self-contained subscriber must not wait for a keyframe")
+	}
+
+	// Non-keyframe AUs deliver immediately.
+	b.Publish(pframe(1))
+	got := drain(t, r, 1, time.Second)
+	if len(got) != 1 || got[0].Seq != 1 {
+		t.Fatalf("want seq 1 delivered, got %+v", got)
+	}
+
+	// Overflow (chan cap 2): oldest evicted, latest kept.
+	b.Publish(pframe(2))
+	b.Publish(pframe(3))
+	b.Publish(pframe(4)) // overflow → evict 2, keep 4
+	got = drain(t, r, 2, time.Second)
+	if len(got) != 2 || got[0].Seq != 3 || got[1].Seq != 4 {
+		t.Fatalf("want seqs 3,4 after overflow, got %+v", got)
+	}
+
+	// CRITICAL: the track is not blackholed after overflow — the
+	// keyframe-gated policy would silently drop everything from here
+	// because no future AU carries Keyframe=true.
+	b.Publish(pframe(5))
+	got = drain(t, r, 1, time.Second)
+	if len(got) != 1 || got[0].Seq != 5 {
+		t.Fatalf("track blackholed after overflow: got %+v", got)
+	}
+	b.Unsubscribe(r)
+}

@@ -101,6 +101,9 @@ func (p *Pump) runBidiPerCall(ctx context.Context, recv *pubsub.Receiver) error 
 			}
 			au = a
 		}
+		if p.cfg.OnWriteAttempt != nil {
+			p.cfg.OnWriteAttempt()
+		}
 
 		wg.Add(1)
 		atomic.AddInt64(&p.bidiInFlight, 1)

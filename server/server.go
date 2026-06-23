@@ -587,6 +587,13 @@ func (s *Server) addTrackInternal(name string, kind track.Kind, priority uint8, 
 		return t.pub
 	}
 	bc := pubsub.NewBroadcaster(s.cfg.PerSubscriberBuffer)
+	// Non-video kinds carry independently-decodable AUs (tokens, tool
+	// calls, telemetry, opus audio frames): disable keyframe gating so
+	// a queue overflow can't silently blackhole the track when the
+	// publisher doesn't set Keyframe on every AU.
+	if kind != track.KindVideo && kind != "" {
+		bc.SetSelfContained(true)
+	}
 	t := &trackEntry{
 		name:     name,
 		kind:     kind,
@@ -994,6 +1001,32 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
+	// /locate answers "which instance holds this parked session?" as a
+	// plain HTTPS probe. WebTransport clients cannot follow the 307
+	// redirect the /wt handler emits (the browser API fails on any
+	// non-2xx response), so a resuming client in a multi-instance
+	// deployment should GET /locate?session=<id> first and dial the
+	// returned instance directly. 404 when the session is unknown or
+	// the store is not distributed; clients then dial any instance.
+	// The session ID is a 128-bit random capability, but the response
+	// deliberately carries only the instance address — never session
+	// state — so a probe with a guessed ID learns nothing useful.
+	mux.HandleFunc("/locate", func(w http.ResponseWriter, r *http.Request) {
+		sessID := r.URL.Query().Get("session")
+		d, ok := s.store.(DistributedSessionStore)
+		if sessID == "" || !ok {
+			http.NotFound(w, r)
+			return
+		}
+		tenant := r.Header.Get("X-QuicRTC-Tenant")
+		addr, found := d.LookupInstance(tenant, sessID)
+		if !found {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"instance":%q}`, addr)
+	})
 
 	s.mu.Lock()
 	s.wt = wts
@@ -1162,6 +1195,12 @@ func (s *Server) runSession(parent context.Context, wt *webtransport.Session) {
 	cfg.OnAnnounce = s.cfg.OnAnnounce
 	cfg.OnKindStats = s.cfg.OnKindStats
 	cfg.InboundRateLimit = s.cfg.InboundRateLimit
+	// Malformed control payloads were previously dropped silently;
+	// surface them so protocol violations are debuggable.
+	cfg.OnProtocolError = func(sessionID string, frameType byte, err error) {
+		s.logger.Warn("quicrtc/server: malformed control frame",
+			"session_id", sessionID, "frame_type", fmt.Sprintf("%#x", frameType), "err", err)
+	}
 	if s.cfg.SupportedFeatures != nil {
 		cfg.SupportedFeatures = s.cfg.SupportedFeatures
 	} else {

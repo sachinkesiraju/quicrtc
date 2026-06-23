@@ -81,6 +81,40 @@ func (o *fakeOpener) Streams() []*fakeSendStream {
 	return append([]*fakeSendStream(nil), o.streams...)
 }
 
+// stuckStream blocks every Write until release is closed — simulates
+// a peer that stops reading, wedging feed writes via flow control.
+type stuckStream struct{ release chan struct{} }
+
+func (s *stuckStream) Write(p []byte) (int, error) {
+	<-s.release
+	return 0, io.ErrClosedPipe
+}
+func (s *stuckStream) Close() error                     { return nil }
+func (s *stuckStream) SetWriteDeadline(time.Time) error { return nil }
+func (s *stuckStream) CancelWrite(uint32)               {}
+
+type stuckOpener struct{ release chan struct{} }
+
+func (o *stuckOpener) OpenSendStream(ctx context.Context) (feed.SendStream, error) {
+	return &stuckStream{release: o.release}, nil
+}
+
+// newStuckSession is newSession with an opener whose streams wedge on
+// Write — for watchdog tests that need "attempted but stuck" writes.
+func newStuckSession(t *testing.T, cfg Config) (*Session, *pipeStream, *pubsub.Broadcaster, *pubsub.Receiver) {
+	t.Helper()
+	srv, cli := net.Pipe()
+	ps := &pipeStream{conn: srv}
+	pc := &pipeStream{conn: cli}
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	b := pubsub.NewBroadcaster(8)
+	r := b.Subscribe()
+	s := New(cfg, ps, &stuckOpener{release: release})
+	s.AttachTrack("primary", r)
+	return s, pc, b, r
+}
+
 func newSession(t *testing.T, cfg Config) (*Session, *pipeStream, *pipeStream, *fakeOpener, *pubsub.Broadcaster) {
 	t.Helper()
 	srv, cli := net.Pipe()
@@ -306,7 +340,47 @@ func TestDataChannelOutbound(t *testing.T) {
 	<-done
 }
 
+// TestIdleWatchdogFires asserts the watchdog fires when a feed write
+// has been ATTEMPTED but cannot complete (peer stopped reading, flow
+// control wedged the stream). A session with nothing to send must NOT
+// fire — see TestQuietSessionStaysAlive.
 func TestIdleWatchdogFires(t *testing.T) {
+	cfg := Config{
+		ExpectSlug:  "secret",
+		IdleTimeout: 100 * time.Millisecond,
+		SDP:         wire.SDP{Codec: "x"},
+	}
+	s, pc, b, r := newStuckSession(t, cfg)
+
+	done := make(chan error, 1)
+	go func() { done <- s.Run(context.Background()) }()
+
+	hb, _ := (wire.Hello{Role: "recv", Slug: "secret", Version: wire.CurrentVersion}).Marshal()
+	wire.WriteControlFrame(pc, wire.TypeHello, hb)
+	wire.ReadControlFrame(pc) // SDP
+
+	// Publish one AU: the pump dequeues it (a write attempt) and
+	// wedges on the stuck stream (no progress). Watchdog must fire.
+	b.Publish(pubsub.AccessUnit{Bytes: []byte("k"), Keyframe: true})
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrIdle) {
+			t.Fatalf("want ErrIdle, got %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("idle watchdog never fired")
+	}
+	pc.Close()
+	b.Unsubscribe(r)
+}
+
+// TestQuietSessionStaysAlive is the counterpart contract: a session
+// with NOTHING to send (agent idle between responses, inbound-only
+// publishers) must not be killed by the idle watchdog. Dead-peer
+// detection for fully-quiet sessions belongs to the QUIC layer's own
+// idle timeout, not this watchdog.
+func TestQuietSessionStaysAlive(t *testing.T) {
 	cfg := Config{
 		ExpectSlug:  "secret",
 		IdleTimeout: 100 * time.Millisecond,
@@ -321,14 +395,19 @@ func TestIdleWatchdogFires(t *testing.T) {
 	wire.WriteControlFrame(pc, wire.TypeHello, hb)
 	wire.ReadControlFrame(pc) // SDP
 
-	// Don't publish anything; wait for watchdog.
+	// Publish nothing. Wait several idle windows; Run must still be
+	// in flight.
 	select {
 	case err := <-done:
-		if !errors.Is(err, ErrIdle) {
-			t.Fatalf("want ErrIdle, got %v", err)
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("idle watchdog never fired")
+		t.Fatalf("quiet session terminated (%v); want it alive", err)
+	case <-time.After(5 * cfg.IdleTimeout):
+	}
+
+	wire.WriteControlFrame(pc, wire.TypeClose, nil)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session did not exit on CLOSE")
 	}
 	pc.Close()
 	for _, r := range s.Receivers("primary") {
@@ -337,15 +416,16 @@ func TestIdleWatchdogFires(t *testing.T) {
 }
 
 // TestPingDoesNotResetIdleTimer is the security-critical assertion:
-// a peer that knows the slug and spams PINGs but never reads the
-// feed must NOT keep the session alive past IdleTimeout.
+// a peer that knows the slug and spams PINGs while never reading the
+// feed — our writes to it are attempted but wedged — must NOT keep
+// the session alive past IdleTimeout.
 func TestPingDoesNotResetIdleTimer(t *testing.T) {
 	cfg := Config{
 		ExpectSlug:  "secret",
 		IdleTimeout: 100 * time.Millisecond,
 		SDP:         wire.SDP{Codec: "x"},
 	}
-	s, _, pc, _, b := newSession(t, cfg)
+	s, pc, b, r := newStuckSession(t, cfg)
 
 	done := make(chan error, 1)
 	go func() { done <- s.Run(context.Background()) }()
@@ -353,6 +433,10 @@ func TestPingDoesNotResetIdleTimer(t *testing.T) {
 	hb, _ := (wire.Hello{Role: "recv", Slug: "secret", Version: wire.CurrentVersion}).Marshal()
 	wire.WriteControlFrame(pc, wire.TypeHello, hb)
 	wire.ReadControlFrame(pc)
+
+	// One AU in flight, wedged on the stuck stream: attempted, no
+	// progress.
+	b.Publish(pubsub.AccessUnit{Bytes: []byte("k"), Keyframe: true})
 
 	// Spam pings while the watchdog should be counting toward expiry.
 	stop := make(chan struct{})
@@ -382,7 +466,5 @@ func TestPingDoesNotResetIdleTimer(t *testing.T) {
 	}
 	close(stop)
 	pc.Close()
-	for _, r := range s.Receivers("primary") {
-		b.Unsubscribe(r)
-	}
+	b.Unsubscribe(r)
 }

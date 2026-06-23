@@ -183,6 +183,9 @@ func (p *Pump) runDatagramOrStream(ctx context.Context, recv *pubsub.Receiver) e
 			}
 			au = a
 		}
+		if p.cfg.OnWriteAttempt != nil {
+			p.cfg.OnWriteAttempt()
+		}
 
 		// Encode envelope + payload into a pooled buffer.
 		bufp := datagramBufPool.Get().(*[]byte)

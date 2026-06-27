@@ -600,6 +600,13 @@ func (s *Session) AttachTrackWithKind(name string, kind track.Kind, recv *pubsub
 	if s.resumedLeading[name] {
 		tp.cfg.AllowLeadingPFrames = true
 	}
+	// When this subscriber negotiated "kind-stats", stamp a publish
+	// wall-clock on every outbound feed frame so it can compute true
+	// publish->recv latency. v1 subscribers never negotiate it, so
+	// they keep receiving plain feed frames.
+	if s.hasNegotiatedFeature(featureKindStats) {
+		tp.cfg.StampPublishWall = true
+	}
 	s.tracks[name] = tp
 	started := s.runStarted
 	ctx := s.runCtx
@@ -941,6 +948,21 @@ func (s *Session) handshake(ctx context.Context) error {
 		return fmt.Errorf("write sdp: %w", err)
 	}
 	return nil
+}
+
+// featureKindStats is the negotiated-feature token for periodic
+// per-Kind subscriber observability (publish wall-clock + KindStats).
+const featureKindStats = "kind-stats"
+
+// hasNegotiatedFeature reports whether feat is in the post-handshake
+// negotiated feature set.
+func (s *Session) hasNegotiatedFeature(feat string) bool {
+	for _, f := range s.NegotiatedFeatures {
+		if f == feat {
+			return true
+		}
+	}
+	return false
 }
 
 // intersectFeatures returns the elements present in both slices.

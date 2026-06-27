@@ -364,6 +364,10 @@ func (r *Relay) sessionLoop(ctx context.Context, c *client.Client, upstreamURL s
 					PTSMicro:      au.PTSMicro,
 					Seq:           au.Seq,
 					Discontinuity: au.Discontinuity,
+					// Preserve the upstream publish wall-clock so a
+					// downstream subscriber measures latency from the
+					// original publisher, not this relay hop.
+					PubWallMicro: au.PubWallMicro,
 				})
 			}
 		}()

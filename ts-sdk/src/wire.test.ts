@@ -51,6 +51,7 @@ import {
   SDP,
   Unannounce,
 } from './types.js';
+import { KindStatsCollector, percentile } from './kindstats.js';
 
 // ============================================================================
 // Test helpers
@@ -343,6 +344,77 @@ async function run() {
     const got = await readFeedFrame(reader);
     assertEqual(got.ptsMicro === pts, true, 'pts');
     assertEqual(got.payload.length, 1000, 'payload length');
+  });
+
+  await test('Feed frame parses publish wall-clock extension', async () => {
+    // The Go server writes header(17) + 8B BE wall + payload when
+    // FlagPublishWall (1<<2) is set. Build that layout by hand since
+    // the TS SDK only ever reads it (subscriber side).
+    const payload = new Uint8Array([0x67, 0x42]);
+    const wall = 1_700_000_000_000_000n; // Unix micros
+    const frame = new Uint8Array(17 + 8 + payload.length);
+    const view = new DataView(frame.buffer);
+    frame[0] = FrameType.Keyframe;
+    frame[1] = (payload.length >> 16) & 0xff;
+    frame[2] = (payload.length >> 8) & 0xff;
+    frame[3] = payload.length & 0xff;
+    view.setBigUint64(4, 9999n, false); // pts
+    view.setUint32(12, 7, false); // seq
+    frame[16] = (1 << 0) | (1 << 2); // Keyframe | PublishWall
+    view.setBigUint64(17, wall, false);
+    frame.set(payload, 25);
+
+    const reader = new BufferedReader(mockReader(frame));
+    const got = await readFeedFrame(reader);
+    assertEqual(got.seq, 7, 'seq');
+    assertEqual(got.pubWallMicro, wall, 'pubWallMicro');
+    assertEqual(got.payload.length, 2, 'payload length');
+  });
+
+  await test('Feed frame without wall flag yields undefined pubWallMicro', async () => {
+    const frame = writeFeedFrame(FrameType.PFrame, 1n, 2, 0, new Uint8Array([9]));
+    const reader = new BufferedReader(mockReader(frame));
+    const got = await readFeedFrame(reader);
+    assertEqual(got.pubWallMicro, undefined, 'pubWallMicro undefined for v1 frame');
+  });
+
+  console.log('\n=== kind-stats collector ===');
+
+  await test('collector computes p50/p99 and resets window', async () => {
+    const c = new KindStatsCollector();
+    const pubMs = 1_000_000; // 1000s in ms-from-micros base
+    const pubMicro = BigInt(pubMs) * 1000n;
+    for (let i = 0; i < 99; i++) c.observe('video', i + 1, pubMicro, pubMs + 10); // 10ms
+    c.observe('video', 100, pubMicro, pubMs + 200); // 200ms outlier
+    const snaps = c.snapshot();
+    assertEqual(snaps.length, 1, 'one kind');
+    assertEqual(snaps[0].kind, 'video', 'kind');
+    assertEqual(snaps[0].recv_p50_ms, 10, 'p50');
+    assertEqual(snaps[0].recv_p99_ms, 10, 'p99 below outlier rank');
+    assertEqual(snaps[0].last_seq, 100, 'last_seq');
+    // Window resets; cumulative last_seq persists.
+    const second = c.snapshot();
+    assertEqual(second[0].recv_p50_ms, 0, 'p50 resets');
+    assertEqual(second[0].last_seq, 100, 'last_seq persists');
+  });
+
+  await test('collector counts seq-gap drops', async () => {
+    const c = new KindStatsCollector();
+    c.observe('data', 1, undefined, Date.now());
+    c.observe('data', 2, undefined, Date.now());
+    c.observe('data', 5, undefined, Date.now()); // +2
+    c.observe('data', 10, undefined, Date.now()); // +4
+    const snaps = c.snapshot();
+    assertEqual(snaps[0].dropped ?? 0, 6, 'dropped');
+    assertEqual(snaps[0].last_seq, 10, 'last_seq');
+    assertEqual(snaps[0].recv_p50_ms, 0, 'no wall -> zero p50');
+  });
+
+  await test('percentile nearest-rank', async () => {
+    const s = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+    assertEqual(percentile(s, 0.5), 6, 'p50');
+    assertEqual(percentile(s, 0.99), 10, 'p99');
+    assertEqual(percentile([42], 0.5), 42, 'single');
   });
 
   console.log('\n=== Stream header + legacy fallback ===');

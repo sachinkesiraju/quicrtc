@@ -86,8 +86,19 @@ export interface FeedFrame {
   seq: number;
   /** Flag bits — see FrameFlags. */
   flags: number;
+  /**
+   * Publisher wall-clock send time in Unix micros, present only when
+   * FlagPublishWall (1<<2) is set in flags; undefined otherwise. Used
+   * by the "kind-stats" feature to compute publish→recv latency.
+   */
+  pubWallMicro?: bigint;
   payload: Uint8Array;
 }
+
+/** FlagPublishWall mirrors FrameFlags.PublishWall (1<<2) in types.ts. */
+const FLAG_PUBLISH_WALL = 1 << 2;
+/** Byte length of the optional publish-wall-clock extension. */
+const WALL_EXT_LEN = 8;
 
 export async function readFeedFrame(reader: BufferedReader): Promise<FeedFrame> {
   const header = await reader.read(FEED_HEADER_LEN);
@@ -108,11 +119,20 @@ export async function readFeedFrame(reader: BufferedReader): Promise<FeedFrame> 
   if (length > MAX_FEED_PAYLOAD) {
     throw new FrameTooLargeError(`feed payload ${length} > ${MAX_FEED_PAYLOAD}`);
   }
+  // Optional publish-wall-clock extension between the fixed header and
+  // the payload. Only present when the server set FlagPublishWall,
+  // which it does solely for subscribers that negotiated "kind-stats".
+  let pubWallMicro: bigint | undefined;
+  if ((flags & FLAG_PUBLISH_WALL) !== 0) {
+    const ext = await reader.read(WALL_EXT_LEN);
+    const extView = new DataView(ext.buffer, ext.byteOffset, ext.byteLength);
+    pubWallMicro = extView.getBigUint64(0, false);
+  }
   let payload: Uint8Array = new Uint8Array(0);
   if (length > 0) {
     payload = await reader.read(length);
   }
-  return { type, ptsMicro, seq, flags, payload };
+  return { type, ptsMicro, seq, flags, pubWallMicro, payload };
 }
 
 export function writeFeedFrame(

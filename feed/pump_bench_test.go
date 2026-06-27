@@ -164,7 +164,7 @@ func TestPooledEncodeMatchesWire(t *testing.T) {
 					t.Fatalf("canonical write: %v", err)
 				}
 				var inlined bytes.Buffer
-				if err := writeFeedFramePooled(&inlined, ty.typ, tc.pts, tc.seq, tc.flags, tc.payload); err != nil {
+				if err := writeFeedFramePooled(&inlined, ty.typ, tc.pts, tc.seq, tc.flags, 0, tc.payload); err != nil {
 					t.Fatalf("inlined write: %v", err)
 				}
 				if !bytes.Equal(canonical.Bytes(), inlined.Bytes()) {
@@ -204,7 +204,7 @@ func TestCoalescedWriteCount(t *testing.T) {
 	}
 
 	var pooled countingWriter
-	if err := writeFeedFramePooled(&pooled, wire.TypeKeyframe, 0, 0, 0, payload); err != nil {
+	if err := writeFeedFramePooled(&pooled, wire.TypeKeyframe, 0, 0, 0, 0, payload); err != nil {
 		t.Fatalf("pooled write: %v", err)
 	}
 	if pooled.writes != 1 {
@@ -223,7 +223,7 @@ func BenchmarkPooledFeedFrame_Token(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = writeFeedFramePooled(&w, wire.TypeKeyframe, uint64(i), uint32(i), 0, payload)
+		_ = writeFeedFramePooled(&w, wire.TypeKeyframe, uint64(i), uint32(i), 0, 0, payload)
 	}
 }
 
@@ -235,7 +235,7 @@ func BenchmarkPooledFeedFrame_Keyframe(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = writeFeedFramePooled(&w, wire.TypeKeyframe, uint64(i), uint32(i), 0, payload)
+		_ = writeFeedFramePooled(&w, wire.TypeKeyframe, uint64(i), uint32(i), 0, 0, payload)
 	}
 }
 

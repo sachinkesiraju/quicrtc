@@ -46,6 +46,13 @@ export interface AccessUnit {
   seq: number;
   /** Decoder-reset hint. */
   discontinuity: boolean;
+  /**
+   * Publisher wall-clock send time in Unix micros, populated only when
+   * the "kind-stats" feature is negotiated and the server stamped the
+   * frame (wire FlagPublishWall). Undefined otherwise. Used to compute
+   * publish→recv latency; not part of the v1 wire format.
+   */
+  pubWallMicro?: bigint;
 }
 
 /**
@@ -271,6 +278,13 @@ export enum FrameType {
 export enum FrameFlags {
   Keyframe = 1 << 0,
   Discontinuity = 1 << 1,
+  /**
+   * PublishWall marks a feed frame that carries an 8-byte big-endian
+   * publish wall-clock timestamp (Unix micros) immediately after the
+   * 17-byte fixed header. Set by the server only for subscribers that
+   * negotiated "kind-stats"; v1 receivers never see it.
+   */
+  PublishWall = 1 << 2,
 }
 
 /**
@@ -280,5 +294,5 @@ export enum FrameFlags {
  * features a Go client does by default.
  */
 export function DefaultClientFeatures(): string[] {
-  return ["resume", "backpressure", "publishback", "stream-header"];
+  return ["resume", "backpressure", "publishback", "stream-header", "kind-stats"];
 }

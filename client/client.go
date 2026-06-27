@@ -88,6 +88,7 @@ func DefaultClientFeatures() []string {
 		"backpressure",
 		"publishback",
 		"stream-header",
+		"kind-stats",
 	}
 }
 
@@ -157,6 +158,12 @@ type Client struct {
 	// from SDP.Features.
 	declaredFeatures   []string
 	negotiatedFeatures []string
+
+	// kindStats accumulates per-Kind receive observability and is
+	// non-nil only when the "kind-stats" feature was negotiated. The
+	// feed-drain goroutines call its observe method; emitKindStats
+	// drains it ~1Hz back to the publisher.
+	kindStats *kindStatsCollector
 }
 
 // pubTrack is one outbound (subscriber→server) track.
@@ -277,6 +284,13 @@ func Dial(ctx context.Context, rawURL string, opts Options) (*Client, error) {
 	if err := c.handshake(slug); err != nil {
 		c.Close()
 		return nil, err
+	}
+	// Activate subscriber-side observability only when the server
+	// negotiated "kind-stats"; otherwise no emitter runs and no
+	// publish wall-clock is expected on inbound frames.
+	if c.hasNegotiatedFeature(featureKindStats) {
+		c.kindStats = newKindStatsCollector()
+		go c.emitKindStats(c.sessionCtx)
 	}
 	go c.controlReader()
 	// feedAcceptor / bidiAcceptor run for the session's lifetime, NOT
@@ -700,6 +714,33 @@ func (c *Client) NegotiatedFeatures() []string {
 	return out
 }
 
+// featureKindStats is the negotiated-feature token enabling the
+// subscriber's periodic per-Kind observability emitter and the
+// publish wall-clock extension on inbound feed frames.
+const featureKindStats = "kind-stats"
+
+// hasNegotiatedFeature reports whether feat is in the set both peers
+// agreed to use.
+func (c *Client) hasNegotiatedFeature(feat string) bool {
+	for _, f := range c.negotiatedFeatures {
+		if f == feat {
+			return true
+		}
+	}
+	return false
+}
+
+// kindForTrack returns the Kind the server announced for a track, or
+// "" when unknown. Used to bucket receive samples for kind-stats.
+func (c *Client) kindForTrack(name string) string {
+	c.feedMu.Lock()
+	defer c.feedMu.Unlock()
+	if a, ok := c.remoteTracks[name]; ok {
+		return a.Kind
+	}
+	return ""
+}
+
 func (c *Client) controlReader() {
 	for {
 		t, payload, err := wire.ReadControlFrame(c.ctl)
@@ -837,10 +878,14 @@ func (c *Client) drainBidi(stream *webtransport.Stream) {
 		src = &peekedReader{first: firstByte, rest: stream}
 	}
 	ch := c.trackChan(trackName)
+	kind := c.kindForTrack(trackName)
 	for {
 		f, err := wire.ReadFeedFrame(src)
 		if err != nil {
 			return
+		}
+		if c.kindStats != nil {
+			c.kindStats.observe(kind, f.Seq, f.PubWallMicro, uint64(time.Now().UnixMicro()))
 		}
 		au := pubsub.AccessUnit{
 			Bytes:         f.Payload,
@@ -848,6 +893,7 @@ func (c *Client) drainBidi(stream *webtransport.Stream) {
 			PTSMicro:      f.PTSMicro,
 			Seq:           f.Seq,
 			Discontinuity: (f.Flags & wire.FlagDiscontinuity) != 0,
+			PubWallMicro:  f.PubWallMicro,
 		}
 		select {
 		case ch <- au:
@@ -872,10 +918,14 @@ func (c *Client) drainFeed(stream *webtransport.ReceiveStream) {
 		src = &peekedReader{first: firstByte, rest: stream}
 	}
 	ch := c.trackChan(trackName)
+	kind := c.kindForTrack(trackName)
 	for {
 		f, err := wire.ReadFeedFrame(src)
 		if err != nil {
 			return
+		}
+		if c.kindStats != nil {
+			c.kindStats.observe(kind, f.Seq, f.PubWallMicro, uint64(time.Now().UnixMicro()))
 		}
 		au := pubsub.AccessUnit{
 			Bytes:         f.Payload,
@@ -883,6 +933,7 @@ func (c *Client) drainFeed(stream *webtransport.ReceiveStream) {
 			PTSMicro:      f.PTSMicro,
 			Seq:           f.Seq,
 			Discontinuity: (f.Flags & wire.FlagDiscontinuity) != 0,
+			PubWallMicro:  f.PubWallMicro,
 		}
 		select {
 		case ch <- au:

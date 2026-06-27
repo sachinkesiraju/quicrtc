@@ -123,6 +123,67 @@ func TestFeedFrameRoundTrip(t *testing.T) {
 	}
 }
 
+func TestFeedFrameWallRoundTrip(t *testing.T) {
+	cases := []struct {
+		name    string
+		flag    byte
+		pubWall uint64
+		pl      []byte
+	}{
+		{"keyframe_wall", FlagKeyframe, 1_700_000_000_000_000, []byte{0x67}},
+		{"disco_wall", FlagKeyframe | FlagDiscontinuity, 42, bytes.Repeat([]byte{0xaa}, 2048)},
+		{"empty_payload_wall", 0, ^uint64(0), nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			if err := WriteFeedFrameWall(&buf, TypeKeyframe, 9999, 7, tc.flag, tc.pubWall, tc.pl); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			f, err := ReadFeedFrame(&buf)
+			if err != nil {
+				t.Fatalf("read: %v", err)
+			}
+			if f.Flags&FlagPublishWall == 0 {
+				t.Fatalf("FlagPublishWall not set on read: flags=%#x", f.Flags)
+			}
+			if f.PubWallMicro != tc.pubWall {
+				t.Fatalf("pubWall mismatch: got %d want %d", f.PubWallMicro, tc.pubWall)
+			}
+			if f.PTSMicro != 9999 || f.Seq != 7 {
+				t.Fatalf("hdr mismatch: %+v", f)
+			}
+			if !bytes.Equal(f.Payload, tc.pl) && !(len(f.Payload) == 0 && len(tc.pl) == 0) {
+				t.Fatalf("payload mismatch")
+			}
+			if buf.Len() != 0 {
+				t.Fatalf("trailing bytes: %d", buf.Len())
+			}
+		})
+	}
+}
+
+// TestFeedFramePlainHasNoWall confirms a v1-style frame (no
+// FlagPublishWall) carries no extension and decodes with PubWallMicro
+// == 0 — the backward-compatibility guarantee for peers that never
+// negotiated "kind-stats".
+func TestFeedFramePlainHasNoWall(t *testing.T) {
+	var buf bytes.Buffer
+	if err := WriteFeedFrame(&buf, TypeKeyframe, 1, 2, FlagKeyframe, []byte{0x01}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if buf.Len() != FeedHeaderLen+1 {
+		t.Fatalf("plain frame should be header+payload (%d), got %d", FeedHeaderLen+1, buf.Len())
+	}
+	f, err := ReadFeedFrame(&buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if f.Flags&FlagPublishWall != 0 || f.PubWallMicro != 0 {
+		t.Fatalf("plain frame should have no wall: flags=%#x wall=%d", f.Flags, f.PubWallMicro)
+	}
+}
+
 func TestFeedFrameTooLarge(t *testing.T) {
 	var buf bytes.Buffer
 	err := WriteFeedFrame(&buf, TypeKeyframe, 0, 0, FlagKeyframe, make([]byte, MaxFeedPayload+1))

@@ -28,11 +28,13 @@ import {
   TransportStats,
   Unannounce,
 } from './types.js';
+import { KindStatsCollector } from './kindstats.js';
 import {
   BufferedReader,
   marshalAnnounce,
   marshalBackpressure,
   marshalHello,
+  marshalKindStats,
   marshalResume,
   marshalUnannounce,
   peekStreamHeader,
@@ -518,6 +520,12 @@ export class QuicRTCClient {
   private unannounceCallbacks: ((name: string) => void)[] = [];
   private kindStatsCallbacks: ((ks: KindStats) => void)[] = [];
 
+  // Subscriber-side kind-stats emitter state. Non-undefined only when
+  // the "kind-stats" feature was negotiated; the feed-drain loop feeds
+  // collector and kindStatsTimer flushes it ~1 Hz to the publisher.
+  private kindStats?: KindStatsCollector;
+  private kindStatsTimer?: ReturnType<typeof setInterval>;
+
   /** Reconnect defaults ON — see QuicRTCClientOptions.reconnect. */
   private reconnectEnabled(): boolean {
     return this.opts.reconnect ?? true;
@@ -783,11 +791,53 @@ export class QuicRTCClient {
     if (i !== -1) this.kindStatsCallbacks.splice(i, 1);
   }
 
+  /**
+   * startKindStatsEmitter activates the subscriber-side per-Kind
+   * observability emitter when the "kind-stats" feature was
+   * negotiated. Idempotent: a prior timer is cleared first so a
+   * reconnect doesn't stack intervals. The collector persists across
+   * reconnects so cumulative last_seq / dropped survive a blip.
+   */
+  private startKindStatsEmitter(): void {
+    if (!this.negotiatedFeaturesValue.includes('kind-stats')) return;
+    this.stopKindStatsEmitter();
+    if (!this.kindStats) this.kindStats = new KindStatsCollector();
+    this.kindStatsTimer = setInterval(() => {
+      void this.flushKindStats();
+    }, 1000);
+  }
+
+  private stopKindStatsEmitter(): void {
+    if (this.kindStatsTimer !== undefined) {
+      clearInterval(this.kindStatsTimer);
+      this.kindStatsTimer = undefined;
+    }
+  }
+
+  private async flushKindStats(): Promise<void> {
+    if (!this.kindStats || this.closed) return;
+    for (const ks of this.kindStats.snapshot()) {
+      try {
+        await this.writeControl(FrameType.KindStats, marshalKindStats(ks));
+      } catch {
+        // Control stream gone; the emitter stops on next teardown.
+        return;
+      }
+    }
+  }
+
+  /** kindForTrack returns the Kind the server announced for a track,
+   * or '' when unknown. Used to bucket kind-stats receive samples. */
+  private kindForTrack(name: string): string {
+    return this.remoteTracks.get(name)?.kind ?? '';
+  }
+
   /** Close — idempotent; concurrent calls share the same promise. */
   async close(): Promise<void> {
     if (this.closed) return this.closePromise;
     this.closed = true;
     this.cancelReconnect();
+    this.stopKindStatsEmitter();
     this.setConnectionState(ConnectionState.Disconnected);
 
     // Abort all reading loops first so their await reader.read()
@@ -899,6 +949,7 @@ export class QuicRTCClient {
       this.startControlReader();
       this.startFeedAcceptor();
       this.startBidiAcceptor();
+      this.startKindStatsEmitter();
 
       this.setConnectionState(ConnectionState.Connected);
       this.currentRetry = 0;
@@ -1150,10 +1201,14 @@ export class QuicRTCClient {
       validateRemoteTrackName(finalName);
 
       const track = this.getOrCreateTrack(finalName);
+      const kind = this.kindForTrack(finalName);
       while (!this.closed && !this.abortController.signal.aborted) {
         const f = await readFeedFrame(buffered);
-        this.bytesIn += 17 + f.payload.length;
+        this.bytesIn += 17 + (f.pubWallMicro !== undefined ? 8 : 0) + f.payload.length;
         this.auReceived++;
+        if (this.kindStats) {
+          this.kindStats.observe(kind, f.seq, f.pubWallMicro, Date.now());
+        }
         const isKey = f.type === FrameType.Keyframe ||
           (f.flags & FrameFlags.Keyframe) !== 0;
         const au: AccessUnit = {
@@ -1162,6 +1217,7 @@ export class QuicRTCClient {
           ptsMicro: f.ptsMicro,
           seq: f.seq,
           discontinuity: (f.flags & FrameFlags.Discontinuity) !== 0,
+          pubWallMicro: f.pubWallMicro,
         };
         // Track last-seen seq for resume.
         this.lastSeqByTrack.set(finalName, f.seq);
@@ -1314,6 +1370,9 @@ export class QuicRTCClient {
    */
   private async teardownTransport(): Promise<void> {
     this.abortController.abort();
+    // Pause the emitter for this transport; reconnect's
+    // startKindStatsEmitter restarts it while preserving the collector.
+    this.stopKindStatsEmitter();
     if (this.datagramReader) {
       try { await this.datagramReader.cancel(); } catch { /* ignore */ }
       this.datagramReader = undefined;

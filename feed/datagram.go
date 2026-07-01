@@ -124,7 +124,7 @@ func (p *Pump) runDatagramOrStream(ctx context.Context, recv *pubsub.Receiver) e
 		var writeErr error
 		p.scheduledDo(func() {
 			_ = s.SetWriteDeadline(time.Now().Add(p.cfg.WriteDeadline))
-			writeErr = writeFeedFramePooled(s, wire.TypeKeyframe, au.PTSMicro, au.Seq, flags, au.Bytes)
+			writeErr = writeFeedFramePooled(s, wire.TypeKeyframe, au.PTSMicro, au.Seq, flags, p.pubWall(au), au.Bytes)
 		})
 		if writeErr != nil {
 			return false
@@ -182,6 +182,9 @@ func (p *Pump) runDatagramOrStream(ctx context.Context, recv *pubsub.Receiver) e
 				return nil
 			}
 			au = a
+		}
+		if p.cfg.OnWriteAttempt != nil {
+			p.cfg.OnWriteAttempt()
 		}
 
 		// Encode envelope + payload into a pooled buffer.

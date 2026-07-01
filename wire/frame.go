@@ -195,7 +195,25 @@ func PeekStreamHeader(r io.Reader) (trackName string, firstByte byte, err error)
 const (
 	FlagKeyframe      byte = 1 << 0
 	FlagDiscontinuity byte = 1 << 1
+
+	// FlagPublishWall marks a feed frame that carries an 8-byte
+	// publish wall-clock timestamp (Unix micros, big-endian) inserted
+	// immediately after the fixed 17-byte header and before the
+	// payload. The 3-byte length field continues to describe the
+	// payload length only.
+	//
+	// Backward compatibility: senders set this bit ONLY when the peer
+	// negotiated the "kind-stats" feature, so v1 receivers — which
+	// never advertise it — never see a frame with the flag set and
+	// keep parsing the plain 17-byte header. A v2 receiver keys off
+	// the bit to read the extra 8 bytes. The timestamp lets a
+	// subscriber compute true publish->recv latency (RecvP50/P99).
+	FlagPublishWall byte = 1 << 2
 )
+
+// WallExtLen is the size of the optional publish-wall-clock extension
+// that follows the fixed header when FlagPublishWall is set.
+const WallExtLen = 8
 
 // MaxControlPayload caps a single control-stream frame. Hard limit
 // before any allocation so an adversarial peer cannot trigger an
@@ -265,7 +283,11 @@ type FeedFrame struct {
 	PTSMicro uint64
 	Seq      uint32
 	Flags    byte
-	Payload  []byte
+	// PubWallMicro is the publisher's wall-clock send time in Unix
+	// micros, present only when Flags&FlagPublishWall != 0. Zero
+	// otherwise. Used by subscribers to compute receive-side latency.
+	PubWallMicro uint64
+	Payload      []byte
 }
 
 // IsKeyframe is true if either the type or the keyframe flag bit
@@ -292,6 +314,15 @@ func ReadFeedFrame(r io.Reader) (FeedFrame, error) {
 		Seq:      binary.BigEndian.Uint32(hdr[12:16]),
 		Flags:    hdr[16],
 	}
+	// Optional publish-wall-clock extension sits between the fixed
+	// header and the payload when FlagPublishWall is set.
+	if f.Flags&FlagPublishWall != 0 {
+		var ext [WallExtLen]byte
+		if _, err := io.ReadFull(r, ext[:]); err != nil {
+			return FeedFrame{}, err
+		}
+		f.PubWallMicro = binary.BigEndian.Uint64(ext[:])
+	}
 	if length > 0 {
 		f.Payload = make([]byte, length)
 		if _, err := io.ReadFull(r, f.Payload); err != nil {
@@ -314,6 +345,34 @@ func WriteFeedFrame(w io.Writer, typ byte, ptsMicro uint64, seq uint32, flags by
 	binary.BigEndian.PutUint64(hdr[4:12], ptsMicro)
 	binary.BigEndian.PutUint32(hdr[12:16], seq)
 	hdr[16] = flags
+	if _, err := w.Write(hdr[:]); err != nil {
+		return err
+	}
+	if len(payload) == 0 {
+		return nil
+	}
+	_, err := w.Write(payload)
+	return err
+}
+
+// WriteFeedFrameWall writes one feed-stream frame that carries a
+// publish wall-clock timestamp. It sets FlagPublishWall on top of the
+// caller's flags and inserts the 8-byte big-endian pubWallMicro
+// between the fixed header and the payload. Use only when the peer
+// negotiated "kind-stats"; v1 receivers cannot parse the extension.
+func WriteFeedFrameWall(w io.Writer, typ byte, ptsMicro uint64, seq uint32, flags byte, pubWallMicro uint64, payload []byte) error {
+	if len(payload) > MaxFeedPayload {
+		return fmt.Errorf("%w: feed %d > %d", ErrFrameTooLarge, len(payload), MaxFeedPayload)
+	}
+	var hdr [FeedHeaderLen + WallExtLen]byte
+	hdr[0] = typ
+	hdr[1] = byte(len(payload) >> 16)
+	hdr[2] = byte(len(payload) >> 8)
+	hdr[3] = byte(len(payload))
+	binary.BigEndian.PutUint64(hdr[4:12], ptsMicro)
+	binary.BigEndian.PutUint32(hdr[12:16], seq)
+	hdr[16] = flags | FlagPublishWall
+	binary.BigEndian.PutUint64(hdr[17:25], pubWallMicro)
 	if _, err := w.Write(hdr[:]); err != nil {
 		return err
 	}

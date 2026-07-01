@@ -187,10 +187,12 @@ type Backpressure struct {
 //
 // LastSeq is the most recent AU sequence number observed on any
 // track of this Kind. RecvP50Ms and RecvP99Ms are receive-side
-// percentiles (publish wall-clock → recv wall-clock) approximated
-// from the subscriber's running histogram. Dropped is the cumulative
-// count of AUs the subscriber dropped due to local backpressure for
-// this Kind.
+// percentiles (publish wall-clock → recv wall-clock) over the most
+// recent reporting window, computed from the subscriber's running
+// samples; they are zero when no publish wall-clock was present.
+// Dropped is the cumulative count of missing AUs inferred from gaps
+// in the observed Seq sequence for this Kind (drops anywhere upstream
+// of the subscriber).
 type KindStats struct {
 	Kind      string `json:"kind"`
 	LastSeq   uint32 `json:"last_seq"`

@@ -28,11 +28,13 @@ import {
   TransportStats,
   Unannounce,
 } from './types.js';
+import { KindStatsCollector } from './kindstats.js';
 import {
   BufferedReader,
   marshalAnnounce,
   marshalBackpressure,
   marshalHello,
+  marshalKindStats,
   marshalResume,
   marshalUnannounce,
   peekStreamHeader,
@@ -450,7 +452,13 @@ class sendPump {
 export interface QuicRTCClientOptions {
   /** Per-track recv queue size when no consumer is reading. Default 100. */
   maxQueueSize?: number;
-  /** Enable automatic reconnect with exponential backoff. Default false. */
+  /**
+   * Automatic reconnect with exponential backoff and session resume.
+   * Default true: the server parks disconnected sessions for its
+   * resume window (60s default) and replays missed AUs on reconnect,
+   * so coming back is cheap and lossless. Set false to surface every
+   * disconnect to the application instead.
+   */
   reconnect?: boolean;
   /** Max reconnect attempts before giving up. Default 5. */
   maxRetries?: number;
@@ -511,6 +519,17 @@ export class QuicRTCClient {
   private announceCallbacks: ((track: RemoteTrack) => void)[] = [];
   private unannounceCallbacks: ((name: string) => void)[] = [];
   private kindStatsCallbacks: ((ks: KindStats) => void)[] = [];
+
+  // Subscriber-side kind-stats emitter state. Non-undefined only when
+  // the "kind-stats" feature was negotiated; the feed-drain loop feeds
+  // collector and kindStatsTimer flushes it ~1 Hz to the publisher.
+  private kindStats?: KindStatsCollector;
+  private kindStatsTimer?: ReturnType<typeof setInterval>;
+
+  /** Reconnect defaults ON — see QuicRTCClientOptions.reconnect. */
+  private reconnectEnabled(): boolean {
+    return this.opts.reconnect ?? true;
+  }
 
   constructor(private readonly opts: QuicRTCClientOptions = {}) {
     // Initialize closePromise eagerly so concurrent close() calls all
@@ -772,11 +791,53 @@ export class QuicRTCClient {
     if (i !== -1) this.kindStatsCallbacks.splice(i, 1);
   }
 
+  /**
+   * startKindStatsEmitter activates the subscriber-side per-Kind
+   * observability emitter when the "kind-stats" feature was
+   * negotiated. Idempotent: a prior timer is cleared first so a
+   * reconnect doesn't stack intervals. The collector persists across
+   * reconnects so cumulative last_seq / dropped survive a blip.
+   */
+  private startKindStatsEmitter(): void {
+    if (!this.negotiatedFeaturesValue.includes('kind-stats')) return;
+    this.stopKindStatsEmitter();
+    if (!this.kindStats) this.kindStats = new KindStatsCollector();
+    this.kindStatsTimer = setInterval(() => {
+      void this.flushKindStats();
+    }, 1000);
+  }
+
+  private stopKindStatsEmitter(): void {
+    if (this.kindStatsTimer !== undefined) {
+      clearInterval(this.kindStatsTimer);
+      this.kindStatsTimer = undefined;
+    }
+  }
+
+  private async flushKindStats(): Promise<void> {
+    if (!this.kindStats || this.closed) return;
+    for (const ks of this.kindStats.snapshot()) {
+      try {
+        await this.writeControl(FrameType.KindStats, marshalKindStats(ks));
+      } catch {
+        // Control stream gone; the emitter stops on next teardown.
+        return;
+      }
+    }
+  }
+
+  /** kindForTrack returns the Kind the server announced for a track,
+   * or '' when unknown. Used to bucket kind-stats receive samples. */
+  private kindForTrack(name: string): string {
+    return this.remoteTracks.get(name)?.kind ?? '';
+  }
+
   /** Close — idempotent; concurrent calls share the same promise. */
   async close(): Promise<void> {
     if (this.closed) return this.closePromise;
     this.closed = true;
     this.cancelReconnect();
+    this.stopKindStatsEmitter();
     this.setConnectionState(ConnectionState.Disconnected);
 
     // Abort all reading loops first so their await reader.read()
@@ -888,12 +949,13 @@ export class QuicRTCClient {
       this.startControlReader();
       this.startFeedAcceptor();
       this.startBidiAcceptor();
+      this.startKindStatsEmitter();
 
       this.setConnectionState(ConnectionState.Connected);
       this.currentRetry = 0;
     } catch (err) {
       this.setConnectionState(ConnectionState.Error);
-      if (this.opts.reconnect && !this.closed) {
+      if (this.reconnectEnabled() && !this.closed) {
         this.scheduleReconnect();
       } else {
         throw err;
@@ -1002,6 +1064,15 @@ export class QuicRTCClient {
             case FrameType.Error:
               throw new ClientError(`server error: ${this.formatServerError(payload)}`, 'server_error');
             case FrameType.Close:
+              // Server is draining (e.g., graceful shutdown in a
+              // multi-instance deployment). With reconnect enabled,
+              // tear down this connection but schedule a reconnect
+              // so the client fails over to another instance.
+              if (this.reconnectEnabled()) {
+                await this.teardownTransport();
+                this.scheduleReconnect();
+                return;
+              }
               await this.close();
               return;
             default:
@@ -1016,7 +1087,7 @@ export class QuicRTCClient {
           this.setConnectionState(ConnectionState.Error);
           // Trigger close (which will fire reconnect if enabled).
           await this.close();
-          if (this.opts.reconnect) {
+          if (this.reconnectEnabled()) {
             this.scheduleReconnect();
           }
         }
@@ -1130,10 +1201,14 @@ export class QuicRTCClient {
       validateRemoteTrackName(finalName);
 
       const track = this.getOrCreateTrack(finalName);
+      const kind = this.kindForTrack(finalName);
       while (!this.closed && !this.abortController.signal.aborted) {
         const f = await readFeedFrame(buffered);
-        this.bytesIn += 17 + f.payload.length;
+        this.bytesIn += 17 + (f.pubWallMicro !== undefined ? 8 : 0) + f.payload.length;
         this.auReceived++;
+        if (this.kindStats) {
+          this.kindStats.observe(kind, f.seq, f.pubWallMicro, Date.now());
+        }
         const isKey = f.type === FrameType.Keyframe ||
           (f.flags & FrameFlags.Keyframe) !== 0;
         const au: AccessUnit = {
@@ -1142,6 +1217,7 @@ export class QuicRTCClient {
           ptsMicro: f.ptsMicro,
           seq: f.seq,
           discontinuity: (f.flags & FrameFlags.Discontinuity) !== 0,
+          pubWallMicro: f.pubWallMicro,
         };
         // Track last-seen seq for resume.
         this.lastSeqByTrack.set(finalName, f.seq);
@@ -1269,8 +1345,12 @@ export class QuicRTCClient {
     this.currentRetry++;
     this.reconnectTimer = setTimeout(async () => {
       try {
-        // Reset the abort controller so the new connection's loops
-        // aren't immediately killed by the previous abort.
+        // The control-reader error path runs close() before scheduling
+        // this reconnect, which sets the closed flag; clear it so the
+        // resumed connection's API surface works again. Reset the
+        // abort controller so the new connection's loops aren't
+        // immediately killed by the previous abort.
+        this.closed = false;
         this.abortController = new AbortController();
         if (this.connectOptions && this.sessionIdValue) {
           this.connectOptions.sessionId = this.sessionIdValue;
@@ -1280,6 +1360,37 @@ export class QuicRTCClient {
         // Already handled in doConnect (errored out → state error).
       }
     }, backoff);
+  }
+
+  /**
+   * teardownTransport tears down the current WebTransport session and
+   * its read loops WITHOUT permanently closing the client. Used when
+   * the server sends TypeClose (drain) and reconnect is enabled: the
+   * client should fail over to another instance, not stop entirely.
+   */
+  private async teardownTransport(): Promise<void> {
+    this.abortController.abort();
+    // Pause the emitter for this transport; reconnect's
+    // startKindStatsEmitter restarts it while preserving the collector.
+    this.stopKindStatsEmitter();
+    if (this.datagramReader) {
+      try { await this.datagramReader.cancel(); } catch { /* ignore */ }
+      this.datagramReader = undefined;
+    }
+    if (this.controlReader) {
+      try { await this.controlReader.cancel('drain-close'); } catch { /* ignore */ }
+    }
+    if (this.controlWriter) {
+      try { await this.controlWriter.close(); } catch { /* ignore */ }
+    }
+    if (this.transport) {
+      try { await this.transport.close(); } catch { /* ignore */ }
+    }
+    this.transport = undefined;
+    this.controlReader = undefined;
+    this.controlWriter = undefined;
+    this.abortController = new AbortController();
+    this.setConnectionState(ConnectionState.Disconnected);
   }
 
   private cancelReconnect(): void {

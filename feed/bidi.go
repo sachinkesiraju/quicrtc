@@ -101,6 +101,9 @@ func (p *Pump) runBidiPerCall(ctx context.Context, recv *pubsub.Receiver) error 
 			}
 			au = a
 		}
+		if p.cfg.OnWriteAttempt != nil {
+			p.cfg.OnWriteAttempt()
+		}
 
 		wg.Add(1)
 		atomic.AddInt64(&p.bidiInFlight, 1)
@@ -140,7 +143,12 @@ func (p *Pump) runBidiPerCall(ctx context.Context, recv *pubsub.Receiver) error 
 			if au.Discontinuity {
 				flags |= wire.FlagDiscontinuity
 			}
-			if err := wire.WriteFeedFrame(stream, wire.TypeKeyframe, au.PTSMicro, au.Seq, flags, au.Bytes); err != nil {
+			if pw := p.pubWall(au); pw != 0 {
+				err = wire.WriteFeedFrameWall(stream, wire.TypeKeyframe, au.PTSMicro, au.Seq, flags, pw, au.Bytes)
+			} else {
+				err = wire.WriteFeedFrame(stream, wire.TypeKeyframe, au.PTSMicro, au.Seq, flags, au.Bytes)
+			}
+			if err != nil {
 				stream.CancelWrite(0)
 				stream.CancelRead(0)
 				if p.cfg.OnAUDropped != nil {

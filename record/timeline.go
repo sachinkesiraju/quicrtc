@@ -103,7 +103,11 @@ func BuildTimeline(path string) (*Timeline, error) {
 		f, err := decodeFrame(cr)
 		if err != nil {
 			// io.EOF is the normal terminator (EOF marker or file end).
-			if errors.Is(err, io.EOF) {
+			// io.ErrUnexpectedEOF means a torn final frame (crash mid-
+			// write); salvage everything decoded so far rather than
+			// discarding hours of good data because the last frame is
+			// half-written.
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 				break
 			}
 			return nil, err

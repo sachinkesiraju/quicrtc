@@ -306,3 +306,77 @@ func TestOnWriteBytesCallback(t *testing.T) {
 		t.Fatalf("OnWriteBytes total: got %d want %d", got, want)
 	}
 }
+
+// TestAllowLeadingPFramesWritesResumeContinuation: with the resume
+// flag set, a receiver whose queue starts with mid-GOP P-frames (the
+// server's resume splice) gets that P-run written on a fresh stream
+// instead of stalling until the next keyframe — the subscriber
+// declared LastSeenSeq, so it holds the GOP head and can decode them.
+func TestAllowLeadingPFramesWritesResumeContinuation(t *testing.T) {
+	b := pubsub.NewBroadcaster(16)
+	r := b.Subscribe()
+	// Simulate the resume splice: mid-GOP P-frames already queued in
+	// the receiver before the pump starts.
+	r.SpliceFront([]pubsub.AccessUnit{pframe(5), pframe(6)})
+	op := &fakeOpener{}
+	p := New(op, Config{AllowLeadingPFrames: true})
+
+	done := make(chan error, 1)
+	go func() { done <- p.Run(context.Background(), r) }()
+
+	// Live keyframe after the continuation: must open a new stream.
+	b.Publish(keyframe(7))
+
+	time.Sleep(50 * time.Millisecond)
+	b.Unsubscribe(r)
+	if err := <-done; err != nil {
+		t.Fatalf("pump: %v", err)
+	}
+
+	streams := op.Streams()
+	if len(streams) != 2 {
+		t.Fatalf("want 2 streams (continuation + new GOP), got %d", len(streams))
+	}
+	cont := parseAllFeedFrames(t, streams[0].Bytes())
+	if len(cont) != 2 || cont[0].IsKeyframe() || cont[0].Seq != 5 || cont[1].Seq != 6 {
+		t.Fatalf("continuation stream should carry P5,P6, got %+v", cont)
+	}
+	if !streams[0].Cancelled() {
+		t.Fatal("continuation stream should be RESET when the keyframe opened a new stream")
+	}
+	gop := parseAllFeedFrames(t, streams[1].Bytes())
+	if len(gop) != 1 || !gop[0].IsKeyframe() || gop[0].Seq != 7 {
+		t.Fatalf("new GOP stream should carry keyframe 7, got %+v", gop)
+	}
+}
+
+// TestLeadingPFramesDroppedWithoutFlag pins the default behavior:
+// P-frames before any keyframe are dropped (no decodable reference),
+// and delivery starts at the first keyframe.
+func TestLeadingPFramesDroppedWithoutFlag(t *testing.T) {
+	b := pubsub.NewBroadcaster(16)
+	r := b.Subscribe()
+	r.SpliceFront([]pubsub.AccessUnit{pframe(5), pframe(6)})
+	op := &fakeOpener{}
+	p := New(op, Config{})
+
+	done := make(chan error, 1)
+	go func() { done <- p.Run(context.Background(), r) }()
+
+	b.Publish(keyframe(7))
+
+	time.Sleep(50 * time.Millisecond)
+	b.Unsubscribe(r)
+	if err := <-done; err != nil {
+		t.Fatalf("pump: %v", err)
+	}
+
+	streams := op.Streams()
+	if len(streams) != 1 {
+		t.Fatalf("want 1 stream (leading P-frames dropped), got %d", len(streams))
+	}
+	frames := parseAllFeedFrames(t, streams[0].Bytes())
+	if len(frames) != 1 || !frames[0].IsKeyframe() || frames[0].Seq != 7 {
+		t.Fatalf("stream should carry only keyframe 7, got %+v", frames)
+	}
+}

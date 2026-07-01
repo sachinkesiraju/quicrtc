@@ -242,8 +242,9 @@ func (r *Relay) claimTrack(name, upstreamURL string) bool {
 // on transient errors using quicrtc's resume protocol.
 func (r *Relay) runUpstream(ctx context.Context, url string) error {
 	var (
-		sessionID string
-		attempts  int
+		sessionID   string
+		lastSeenSeq map[string]uint32
+		attempts    int
 	)
 	for {
 		// Reconnect bookkeeping: capped retry, exponential off optional
@@ -252,6 +253,7 @@ func (r *Relay) runUpstream(ctx context.Context, url string) error {
 		opts := r.cfg.ClientOptions
 		if sessionID != "" {
 			opts.SessionID = sessionID
+			opts.LastSeenSeq = lastSeenSeq
 		}
 		c, err := client.Dial(ctx, url, opts)
 		if err != nil {
@@ -274,6 +276,7 @@ func (r *Relay) runUpstream(ctx context.Context, url string) error {
 		// clean ctx cancel, or an error if the upstream session died
 		// (in which case we loop to reconnect).
 		err = r.sessionLoop(ctx, c, url)
+		lastSeenSeq = c.LastSeenSeq()
 		_ = c.Close()
 		if err == nil {
 			return nil
@@ -356,10 +359,15 @@ func (r *Relay) sessionLoop(ctx context.Context, c *client.Client, upstreamURL s
 					return
 				}
 				_ = pub.Publish(pumpCtx, pubsub.AccessUnit{
-					Bytes:    au.Bytes,
-					Keyframe: au.Keyframe,
-					PTSMicro: au.PTSMicro,
-					Seq:      au.Seq,
+					Bytes:         au.Bytes,
+					Keyframe:      au.Keyframe,
+					PTSMicro:      au.PTSMicro,
+					Seq:           au.Seq,
+					Discontinuity: au.Discontinuity,
+					// Preserve the upstream publish wall-clock so a
+					// downstream subscriber measures latency from the
+					// original publisher, not this relay hop.
+					PubWallMicro: au.PubWallMicro,
 				})
 			}
 		}()
@@ -386,6 +394,8 @@ func (r *Relay) sessionLoop(ctx context.Context, c *client.Client, upstreamURL s
 			return nil
 		case <-r.closed:
 			return nil
+		case <-c.Done():
+			return errors.New("upstream client died")
 		case <-tick.C:
 			for _, name := range c.RemoteTracks() {
 				startPump(name)

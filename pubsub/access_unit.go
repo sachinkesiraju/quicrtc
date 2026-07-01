@@ -64,6 +64,17 @@ type AccessUnit struct {
 	// before consuming this unit (e.g., after a long subscriber stall).
 	Discontinuity bool
 
+	// PubWallMicro is the publisher's wall-clock send time in Unix
+	// micros. Unlike PTSMicro (a presentation clock that may be
+	// arbitrary), this is real wall-clock time used to compute true
+	// publish->recv latency for the "kind-stats" feature. It rides
+	// the wire only when the subscriber negotiated "kind-stats" (see
+	// wire.FlagPublishWall); v1 peers never see it. Zero means
+	// "unstamped" — the egress pump stamps it at write time, and
+	// relays preserve a nonzero value forwarded from upstream so the
+	// original publish time survives across hops.
+	PubWallMicro uint64
+
 	// --- Phase 2 fields (wire format v2) ---
 
 	// Meta is typed per-kind metadata. Examples by track kind:

@@ -88,6 +88,7 @@ func DefaultClientFeatures() []string {
 		"backpressure",
 		"publishback",
 		"stream-header",
+		"kind-stats",
 	}
 }
 
@@ -124,6 +125,7 @@ type Client struct {
 	// "primary" too.
 	feedMu       sync.Mutex
 	tracks       map[string]chan pubsub.AccessUnit
+	trackDone    map[string]chan struct{} // closed on Unannounce; RecvOn returns io.EOF
 	remoteTracks map[string]wire.Announce // tracks the server has Announced
 	feedErr      chan error
 
@@ -139,9 +141,9 @@ type Client struct {
 	// to resume (set from Options.SessionID). assignedSessionID is
 	// what the server gave us back in the SDP response — call
 	// SessionID() to read it.
-	requestedSessionID  string
-	assignedSessionID   string
-	requestedLastSeen   map[string]uint32 // sent in HELLO.LastSeenSeq on resume
+	requestedSessionID string
+	assignedSessionID  string
+	requestedLastSeen  map[string]uint32 // sent in HELLO.LastSeenSeq on resume
 
 	// seqMu guards lastSeenSeq. Each successful RecvOn updates the
 	// per-track high-water seq so the caller can read LastSeenSeq()
@@ -156,6 +158,12 @@ type Client struct {
 	// from SDP.Features.
 	declaredFeatures   []string
 	negotiatedFeatures []string
+
+	// kindStats accumulates per-Kind receive observability and is
+	// non-nil only when the "kind-stats" feature was negotiated. The
+	// feed-drain goroutines call its observe method; emitKindStats
+	// drains it ~1Hz back to the publisher.
+	kindStats *kindStatsCollector
 }
 
 // pubTrack is one outbound (subscriber→server) track.
@@ -255,6 +263,7 @@ func Dial(ctx context.Context, rawURL string, opts Options) (*Client, error) {
 		sessionCtx:         sessionCtx,
 		sessionCancel:      sessionCancel,
 		tracks:             map[string]chan pubsub.AccessUnit{"primary": make(chan pubsub.AccessUnit, 16)},
+		trackDone:          make(map[string]chan struct{}),
 		feedErr:            make(chan error, 1),
 		pubTracks:          make(map[string]*pubTrack),
 		requestedSessionID: opts.SessionID,
@@ -275,6 +284,13 @@ func Dial(ctx context.Context, rawURL string, opts Options) (*Client, error) {
 	if err := c.handshake(slug); err != nil {
 		c.Close()
 		return nil, err
+	}
+	// Activate subscriber-side observability only when the server
+	// negotiated "kind-stats"; otherwise no emitter runs and no
+	// publish wall-clock is expected on inbound frames.
+	if c.hasNegotiatedFeature(featureKindStats) {
+		c.kindStats = newKindStatsCollector()
+		go c.emitKindStats(c.sessionCtx)
 	}
 	go c.controlReader()
 	// feedAcceptor / bidiAcceptor run for the session's lifetime, NOT
@@ -303,8 +319,10 @@ func (c *Client) Recv(ctx context.Context) (pubsub.AccessUnit, error) {
 // RecvOn blocks until the next AccessUnit on the named track arrives.
 // The first time a track name is seen — either via this call or via
 // an inbound stream-header frame — its receive queue is created.
+// Returns io.EOF if the track has been unannounced by the server.
 func (c *Client) RecvOn(ctx context.Context, trackName string) (pubsub.AccessUnit, error) {
 	ch := c.trackChan(trackName)
+	done := c.trackDoneChan(trackName)
 	select {
 	case au, ok := <-ch:
 		if !ok {
@@ -314,6 +332,8 @@ func (c *Client) RecvOn(ctx context.Context, trackName string) (pubsub.AccessUni
 		return au, nil
 	case err := <-c.feedErr:
 		return pubsub.AccessUnit{}, err
+	case <-done:
+		return pubsub.AccessUnit{}, io.EOF
 	case <-ctx.Done():
 		return pubsub.AccessUnit{}, ctx.Err()
 	case <-c.closed:
@@ -343,6 +363,19 @@ func (c *Client) trackChan(name string) chan pubsub.AccessUnit {
 	}
 	ch := make(chan pubsub.AccessUnit, 16)
 	c.tracks[name] = ch
+	return ch
+}
+
+// trackDoneChan returns (creating if needed) the done channel for a
+// named track. Closed when the server sends Unannounce for this track.
+func (c *Client) trackDoneChan(name string) <-chan struct{} {
+	c.feedMu.Lock()
+	defer c.feedMu.Unlock()
+	if ch, ok := c.trackDone[name]; ok {
+		return ch
+	}
+	ch := make(chan struct{})
+	c.trackDone[name] = ch
 	return ch
 }
 
@@ -451,6 +484,11 @@ func (c *Client) Publish(ctx context.Context, lt track.LocalTrack) (Sender, erro
 		return &clientSender{c: c, name: name, bc: existing.bc}, nil
 	}
 	bc := pubsub.NewBroadcaster(0) // default per-subscriber buffer
+	// Mirror the server's policy: non-video kinds are independently
+	// decodable, so overflow must not gate on keyframes.
+	if lt.Kind != track.KindVideo && lt.Kind != "" {
+		bc.SetSelfContained(true)
+	}
 	pt := &pubTrack{name: name, bc: bc}
 	c.pubTracks[name] = pt
 	c.pubMu.Unlock()
@@ -570,6 +608,12 @@ func (u *clientUniStream) CancelWrite(code uint32) {
 	u.s.CancelWrite(webtransport.StreamErrorCode(code))
 }
 
+// Done returns a channel that is closed when the client's underlying
+// transport dies (e.g., the QUIC connection drops, the server shuts
+// down, or Close() is called). Relay pumps select on this to detect
+// upstream death and break out of their session loop for reconnect.
+func (c *Client) Done() <-chan struct{} { return c.closed }
+
 // Close ends the session.
 func (c *Client) Close() error {
 	c.closeOnce.Do(func() {
@@ -670,6 +714,33 @@ func (c *Client) NegotiatedFeatures() []string {
 	return out
 }
 
+// featureKindStats is the negotiated-feature token enabling the
+// subscriber's periodic per-Kind observability emitter and the
+// publish wall-clock extension on inbound feed frames.
+const featureKindStats = "kind-stats"
+
+// hasNegotiatedFeature reports whether feat is in the set both peers
+// agreed to use.
+func (c *Client) hasNegotiatedFeature(feat string) bool {
+	for _, f := range c.negotiatedFeatures {
+		if f == feat {
+			return true
+		}
+	}
+	return false
+}
+
+// kindForTrack returns the Kind the server announced for a track, or
+// "" when unknown. Used to bucket receive samples for kind-stats.
+func (c *Client) kindForTrack(name string) string {
+	c.feedMu.Lock()
+	defer c.feedMu.Unlock()
+	if a, ok := c.remoteTracks[name]; ok {
+		return a.Kind
+	}
+	return ""
+}
+
 func (c *Client) controlReader() {
 	for {
 		t, payload, err := wire.ReadControlFrame(c.ctl)
@@ -717,17 +788,18 @@ func (c *Client) handleRemoteAnnounce(a wire.Announce) {
 }
 
 // handleRemoteUnannounce removes the named track from the client's
-// active set. The recv channel is NOT closed: any drainFeed goroutine
-// still running for an in-flight stream of this track would race on
-// send-to-closed-channel. The associated QUIC stream is cancelled by
-// the server, so drainFeed will exit on its next ReadFeedFrame error.
-//
-// RecvOn callers blocked on the old channel will see no further AUs
-// and should rely on context cancellation to unblock; a future Phase
-// 4 enhancement can deliver an explicit io.EOF via a sentinel value.
+// active set and closes the track's done channel so any blocked
+// RecvOn returns io.EOF. The recv channel itself is NOT closed:
+// drainFeed goroutines may still be writing into it from an
+// in-flight stream. The done channel is safe to close because
+// only this path ever closes it (guarded by delete-from-map).
 func (c *Client) handleRemoteUnannounce(u wire.Unannounce) {
 	c.feedMu.Lock()
 	delete(c.tracks, u.Name)
+	if done, ok := c.trackDone[u.Name]; ok {
+		close(done)
+		delete(c.trackDone, u.Name)
+	}
 	if c.remoteTracks != nil {
 		delete(c.remoteTracks, u.Name)
 	}
@@ -806,10 +878,14 @@ func (c *Client) drainBidi(stream *webtransport.Stream) {
 		src = &peekedReader{first: firstByte, rest: stream}
 	}
 	ch := c.trackChan(trackName)
+	kind := c.kindForTrack(trackName)
 	for {
 		f, err := wire.ReadFeedFrame(src)
 		if err != nil {
 			return
+		}
+		if c.kindStats != nil {
+			c.kindStats.observe(kind, f.Seq, f.PubWallMicro, uint64(time.Now().UnixMicro()))
 		}
 		au := pubsub.AccessUnit{
 			Bytes:         f.Payload,
@@ -817,6 +893,7 @@ func (c *Client) drainBidi(stream *webtransport.Stream) {
 			PTSMicro:      f.PTSMicro,
 			Seq:           f.Seq,
 			Discontinuity: (f.Flags & wire.FlagDiscontinuity) != 0,
+			PubWallMicro:  f.PubWallMicro,
 		}
 		select {
 		case ch <- au:
@@ -841,10 +918,14 @@ func (c *Client) drainFeed(stream *webtransport.ReceiveStream) {
 		src = &peekedReader{first: firstByte, rest: stream}
 	}
 	ch := c.trackChan(trackName)
+	kind := c.kindForTrack(trackName)
 	for {
 		f, err := wire.ReadFeedFrame(src)
 		if err != nil {
 			return
+		}
+		if c.kindStats != nil {
+			c.kindStats.observe(kind, f.Seq, f.PubWallMicro, uint64(time.Now().UnixMicro()))
 		}
 		au := pubsub.AccessUnit{
 			Bytes:         f.Payload,
@@ -852,6 +933,7 @@ func (c *Client) drainFeed(stream *webtransport.ReceiveStream) {
 			PTSMicro:      f.PTSMicro,
 			Seq:           f.Seq,
 			Discontinuity: (f.Flags & wire.FlagDiscontinuity) != 0,
+			PubWallMicro:  f.PubWallMicro,
 		}
 		select {
 		case ch <- au:

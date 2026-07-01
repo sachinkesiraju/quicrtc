@@ -88,6 +88,14 @@ type Config struct {
 	// the wire-byte count. Optional; useful for metrics.
 	OnWriteBytes func(n int)
 
+	// OnWriteAttempt is called when the pump dequeues an AU and is
+	// about to deliver it (before the write). Paired with
+	// OnWriteBytes it lets an observer distinguish "nothing to send"
+	// (no attempts) from "writes are stuck" (attempts without
+	// successes) — the session's idle watchdog keys on exactly that
+	// distinction. Optional.
+	OnWriteAttempt func()
+
 	// TrackName, if non-empty, causes the pump to write a
 	// TypeStreamHeader frame as the first frame on each new uni
 	// stream so the receiver can route AUs to the right track. An
@@ -198,6 +206,27 @@ type Config struct {
 	// memory caps under high call rates or when responses are bounded
 	// by the application's protocol (e.g., a tool-call schema).
 	MaxBidiResponse int64
+
+	// AllowLeadingPFrames permits the stream-per-GOP pump to open its
+	// FIRST stream on a P-frame and write the leading P-frame run
+	// without a keyframe. Set only for resumed sessions where the
+	// subscriber declared a per-track continuation point
+	// (HELLO.LastSeenSeq): the subscriber already holds the GOP head,
+	// so the spliced mid-GOP P-frames are decodable continuation, not
+	// garbage. Applies to the first stream only — after any keyframe
+	// or stream failure, normal keyframe-first rules resume.
+	AllowLeadingPFrames bool
+
+	// StampPublishWall, when true, causes the pump to attach an
+	// 8-byte publish wall-clock timestamp (wire.FlagPublishWall) to
+	// every feed frame it writes. The high-level server sets this on
+	// a subscriber's pump only when that subscriber negotiated the
+	// "kind-stats" feature, so v1 peers never receive the extension.
+	// The stamp is preserve-if-nonzero: an AU forwarded from upstream
+	// with a nonzero PubWallMicro keeps it (true end-to-end latency
+	// across relay hops); a locally-originated AU is stamped at
+	// egress with the current wall clock.
+	StampPublishWall bool
 
 	// OnBidiResponse is invoked when a bidi call completes. seq matches
 	// the AU's Seq for correlation. response holds the bytes received
@@ -353,6 +382,31 @@ func (p *Pump) scheduledDo(fn func()) {
 	<-done
 }
 
+// openGOPStream opens one uni stream and writes the multi-track
+// header. Shared by the keyframe path and the resume-continuation
+// path in runStreamGOP.
+func (p *Pump) openGOPStream(ctx context.Context) (SendStream, error) {
+	openCtx, cancel := context.WithTimeout(ctx, p.cfg.OpenDeadlineKeyframe)
+	s, err := p.opener.OpenSendStream(openCtx)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	// Write the stream header (if multi-track) before any feed
+	// frames so the receiver can demux this stream.
+	if p.cfg.TrackName != "" {
+		_ = s.SetWriteDeadline(time.Now().Add(p.cfg.WriteDeadline))
+		if err := wire.WriteStreamHeader(s, p.cfg.TrackName); err != nil {
+			s.CancelWrite(0)
+			return nil, err
+		}
+	}
+	if p.cfg.OnStreamOpened != nil {
+		p.cfg.OnStreamOpened(p.cfg.TrackName, p.cfg.Priority)
+	}
+	return s, nil
+}
+
 // runStreamGOP is the legacy per-GOP pump: one uni stream per
 // keyframe, P-frames written in-stream, prev stream RESET on next
 // keyframe. The video path; the structurally-correct choice when
@@ -364,6 +418,12 @@ func (p *Pump) runStreamGOP(ctx context.Context, recv *pubsub.Receiver) error {
 			_ = current.Close()
 		}
 	}()
+
+	// leadingAllowed permits the FIRST stream to start on a P-frame
+	// (resume continuation — see Config.AllowLeadingPFrames). Cleared
+	// once any stream is opened or any keyframe arrives: after that,
+	// a missing stream means a real gap and only a keyframe resyncs.
+	leadingAllowed := p.cfg.AllowLeadingPFrames
 
 	frames := recv.Frames()
 	for {
@@ -377,46 +437,50 @@ func (p *Pump) runStreamGOP(ctx context.Context, recv *pubsub.Receiver) error {
 			}
 			au = a
 		}
+		if p.cfg.OnWriteAttempt != nil {
+			p.cfg.OnWriteAttempt()
+		}
 
 		if au.Keyframe {
+			leadingAllowed = false
 			// Reset the previous GOP's stream so any in-flight bytes
 			// are discarded — the receiver will resync on this new
 			// keyframe regardless.
 			if current != nil {
 				current.CancelWrite(0)
 			}
-			openCtx, cancel := context.WithTimeout(ctx, p.cfg.OpenDeadlineKeyframe)
-			s, err := p.opener.OpenSendStream(openCtx)
-			cancel()
+			s, err := p.openGOPStream(ctx)
 			if err != nil {
 				current = nil
 				recv.RequestKeyframe()
 				continue
 			}
-			// Write the stream header (if multi-track) before any
-			// feed frames so the receiver can demux this stream.
-			if p.cfg.TrackName != "" {
-				_ = s.SetWriteDeadline(time.Now().Add(p.cfg.WriteDeadline))
-				if err := wire.WriteStreamHeader(s, p.cfg.TrackName); err != nil {
-					s.CancelWrite(0)
-					current = nil
-					recv.RequestKeyframe()
-					continue
-				}
-			}
-			if p.cfg.OnStreamOpened != nil {
-				p.cfg.OnStreamOpened(p.cfg.TrackName, p.cfg.Priority)
-			}
 			current = s
 		}
 
-		// P-frame without a current stream: the receiver just joined
-		// mid-GOP and the very first AU dispatched to it was a P-frame
-		// (e.g. its channel was full when a keyframe was published).
-		// We have no decodable reference; ask for a fresh keyframe.
+		// P-frame without a current stream. Two cases:
+		//
+		//   - Resume continuation (leadingAllowed): the subscriber
+		//     declared LastSeenSeq, so it holds this GOP's head and
+		//     these P-frames are decodable. Open the first stream and
+		//     write them — this is what makes resume gap-free for
+		//     video instead of stalling until the next keyframe.
+		//
+		//   - Mid-session (the common case): the receiver joined
+		//     mid-GOP or a prior frame was dropped. No decodable
+		//     reference; ask for a fresh keyframe.
 		if current == nil {
-			recv.RequestKeyframe()
-			continue
+			if !leadingAllowed {
+				recv.RequestKeyframe()
+				continue
+			}
+			leadingAllowed = false // one continuation stream only
+			s, err := p.openGOPStream(ctx)
+			if err != nil {
+				recv.RequestKeyframe()
+				continue
+			}
+			current = s
 		}
 
 		typ := wire.TypePFrame
@@ -429,7 +493,7 @@ func (p *Pump) runStreamGOP(ctx context.Context, recv *pubsub.Receiver) error {
 			flags |= wire.FlagDiscontinuity
 		}
 
-		writeErr := p.writeFrame(current, typ, au.PTSMicro, au.Seq, flags, au.Bytes)
+		writeErr := p.writeFrame(current, typ, au.PTSMicro, au.Seq, flags, p.pubWall(au), au.Bytes)
 		if writeErr != nil {
 			current.CancelWrite(0)
 			current = nil
@@ -528,6 +592,9 @@ func (p *Pump) runStreamLowLatency(ctx context.Context, recv *pubsub.Receiver) e
 			}
 			au = a
 		}
+		if p.cfg.OnWriteAttempt != nil {
+			p.cfg.OnWriteAttempt()
+		}
 
 		// Lazy stream re-open: if the initial open failed (or a write
 		// fault destroyed the stream below), retry on each AU. The
@@ -549,7 +616,7 @@ func (p *Pump) runStreamLowLatency(ctx context.Context, recv *pubsub.Receiver) e
 			flags |= wire.FlagDiscontinuity
 		}
 
-		writeErr := p.writeFrame(stream, wire.TypeKeyframe, au.PTSMicro, au.Seq, flags, au.Bytes)
+		writeErr := p.writeFrame(stream, wire.TypeKeyframe, au.PTSMicro, au.Seq, flags, p.pubWall(au), au.Bytes)
 		if writeErr != nil {
 			// Write failed — could be a transient deadline elapse or
 			// the stream genuinely dying. Distinguish would require
@@ -586,8 +653,11 @@ const pacingChunkBytes = 16 * 1024
 //
 // length is len(payload) — the fixed-size feed metadata sits between the
 // length and the payload, matching wire.WriteFeedFrame exactly.
-func appendFeedFrame(dst []byte, typ byte, pts uint64, seq uint32, flags byte, payload []byte) []byte {
+func appendFeedFrame(dst []byte, typ byte, pts uint64, seq uint32, flags byte, pubWall uint64, payload []byte) []byte {
 	n := len(payload)
+	if pubWall != 0 {
+		flags |= wire.FlagPublishWall
+	}
 	dst = append(dst,
 		typ,
 		byte(n>>16), byte(n>>8), byte(n),
@@ -596,6 +666,12 @@ func appendFeedFrame(dst []byte, typ byte, pts uint64, seq uint32, flags byte, p
 		byte(seq>>24), byte(seq>>16), byte(seq>>8), byte(seq),
 		flags,
 	)
+	if pubWall != 0 {
+		dst = append(dst,
+			byte(pubWall>>56), byte(pubWall>>48), byte(pubWall>>40), byte(pubWall>>32),
+			byte(pubWall>>24), byte(pubWall>>16), byte(pubWall>>8), byte(pubWall),
+		)
+	}
 	return append(dst, payload...)
 }
 
@@ -603,20 +679,35 @@ func appendFeedFrame(dst []byte, typ byte, pts uint64, seq uint32, flags byte, p
 // stream.Write (header + payload coalesced so quic-go can pack one
 // packet), using a pooled scratch buffer to avoid a per-call allocation.
 // Used by the non-scheduler / small-frame path in writeFrame.
-func writeFeedFramePooled(w io.Writer, typ byte, pts uint64, seq uint32, flags byte, payload []byte) error {
+func writeFeedFramePooled(w io.Writer, typ byte, pts uint64, seq uint32, flags byte, pubWall uint64, payload []byte) error {
 	// Reject oversize payloads before encoding. The 3-byte length field
 	// caps at MaxFeedPayload; silently truncating would desync the wire.
 	if len(payload) > wire.MaxFeedPayload {
 		return fmt.Errorf("%w: feed %d > %d", wire.ErrFrameTooLarge, len(payload), wire.MaxFeedPayload)
 	}
 	bufp := lowLatencyBufPool.Get().(*[]byte)
-	buf := appendFeedFrame((*bufp)[:0], typ, pts, seq, flags, payload)
+	buf := appendFeedFrame((*bufp)[:0], typ, pts, seq, flags, pubWall, payload)
 	defer func() {
 		*bufp = buf[:0]
 		lowLatencyBufPool.Put(bufp)
 	}()
 	_, err := w.Write(buf)
 	return err
+}
+
+// pubWall returns the publish wall-clock (Unix micros) to stamp on an
+// outbound AU, or 0 when the "kind-stats" feature was not negotiated
+// for this pump's subscriber. Preserve-if-nonzero: a value forwarded
+// from upstream survives so end-to-end latency is measured from the
+// original publish across relay hops.
+func (p *Pump) pubWall(au pubsub.AccessUnit) uint64 {
+	if !p.cfg.StampPublishWall {
+		return 0
+	}
+	if au.PubWallMicro != 0 {
+		return au.PubWallMicro
+	}
+	return uint64(time.Now().UnixMicro())
 }
 
 // writeFrame writes one feed frame to w through the pump's scheduling
@@ -628,7 +719,7 @@ func writeFeedFramePooled(w io.Writer, typ byte, pts uint64, seq uint32, flags b
 // same pump writes its own chunks sequentially (scheduledDo blocks until
 // each runs), so a frame's bytes stay contiguous and in order on its
 // stream; only OTHER pumps' work — on OTHER streams — interleaves.
-func (p *Pump) writeFrame(w SendStream, typ byte, pts uint64, seq uint32, flags byte, payload []byte) error {
+func (p *Pump) writeFrame(w SendStream, typ byte, pts uint64, seq uint32, flags byte, pubWall uint64, payload []byte) error {
 	if len(payload) > wire.MaxFeedPayload {
 		return fmt.Errorf("%w: feed %d > %d", wire.ErrFrameTooLarge, len(payload), wire.MaxFeedPayload)
 	}
@@ -636,13 +727,13 @@ func (p *Pump) writeFrame(w SendStream, typ byte, pts uint64, seq uint32, flags 
 		var err error
 		p.scheduledDo(func() {
 			_ = w.SetWriteDeadline(time.Now().Add(p.cfg.WriteDeadline))
-			err = writeFeedFramePooled(w, typ, pts, seq, flags, payload)
+			err = writeFeedFramePooled(w, typ, pts, seq, flags, pubWall, payload)
 		})
 		return err
 	}
 	// Large frame under a scheduler: chunked cooperative write.
 	bufp := lowLatencyBufPool.Get().(*[]byte)
-	buf := appendFeedFrame((*bufp)[:0], typ, pts, seq, flags, payload)
+	buf := appendFeedFrame((*bufp)[:0], typ, pts, seq, flags, pubWall, payload)
 	defer func() {
 		*bufp = buf[:0]
 		lowLatencyBufPool.Put(bufp)

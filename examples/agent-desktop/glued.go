@@ -39,7 +39,7 @@ import (
 )
 
 // tokenRing buffers recent token events for SSE replay. 1024 tokens
-// at ~30 tok/s ≈ 34 s of history — same order as quicrtc's built-in
+// at ~50 tok/s ≈ 20 s of history — same order as quicrtc's built-in
 // 256-AU replay window.
 type tokenRing struct {
 	mu   sync.Mutex

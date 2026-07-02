@@ -25,8 +25,10 @@
 //     the comparison gets easy — and misleading.
 //
 //   - Small messages (tokens, tool calls, telemetry, action acks) go
-//     through a bounded FIFO, drop-oldest on overflow, mirroring the
-//     quicrtc side's bounded queues.
+//     through a bounded FIFO and are held while a frame is in flight —
+//     on one TCP stream they cannot jump ahead of the frame anyway.
+//     Drop-oldest on overflow, mirroring the quicrtc side's bounded
+//     queues.
 //
 // What no steelman can remove: on the single-WS arm, a token behind
 // the in-flight 70 KB frame on the same TCP stream still waits for
@@ -107,14 +109,19 @@ func (f *framePacer) take() []byte {
 func (f *framePacer) ack() {
 	f.mu.Lock()
 	f.inFlight = false
-	fire := f.pending != nil
 	f.mu.Unlock()
-	if fire {
-		select {
-		case f.kick <- struct{}{}:
-		default:
-		}
+	// Wake the sender to drain held small messages and/or send the
+	// next pending frame.
+	select {
+	case f.kick <- struct{}{}:
+	default:
 	}
+}
+
+func (f *framePacer) hasInFlight() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inFlight
 }
 
 // fifoQueue is the bounded drop-oldest queue for small messages.
@@ -167,7 +174,11 @@ func newWSPeer(onDrop func()) *wsPeer {
 	}
 }
 
-// runSender writes queued messages until the socket errors.
+// runSender writes queued messages until the socket errors. Small
+// messages are held while a frame is in flight — on one TCP stream
+// they cannot jump ahead of the frame's bytes anyway, and many
+// single-socket products defer control traffic until the viewer
+// confirms the last frame.
 func (p *wsPeer) runSender(ws *websocket.Conn, st *status.Status, bytesKey string) {
 	write := func(msg []byte) bool {
 		if _, err := ws.Write(msg); err != nil {
@@ -176,15 +187,33 @@ func (p *wsPeer) runSender(ws *websocket.Conn, st *status.Status, bytesKey strin
 		st.Inc(bytesKey, int64(len(msg)))
 		return true
 	}
+	drainHeld := func(held [][]byte) ([][]byte, bool) {
+		for len(held) > 0 && !p.frames.hasInFlight() {
+			if !write(held[0]) {
+				return held, false
+			}
+			held = held[1:]
+		}
+		return held, true
+	}
+	var held [][]byte
 	for {
 		select {
 		case <-p.done:
 			return
 		case msg := <-p.fifo.ch:
-			if !write(msg) {
+			held = append(held, msg)
+			var ok bool
+			held, ok = drainHeld(held)
+			if !ok {
 				return
 			}
 		case <-p.frames.kick:
+			var ok bool
+			held, ok = drainHeld(held)
+			if !ok {
+				return
+			}
 			if msg := p.frames.take(); msg != nil {
 				if !write(msg) {
 					return

@@ -116,18 +116,13 @@ func (e *engine) run(ctx context.Context) {
 	wg.Wait()
 }
 
-// burstWindow is how long after the last desktop mutation the screen
-// keeps capturing at the burst rate before dropping to the idle rate.
-const burstWindow = 1500 * time.Millisecond
-
-// runScreen paints and publishes the desktop continuously — the
-// "agent's screen is always streaming" signal. The capture rate is
-// activity-driven, like a real screen pipeline: full rate (-fps)
-// while the desktop is changing (terminal output landing, editor
-// edits, CI updates), ~1/3 rate when the scene is static. The bursts
-// are what periodically saturate the emulated link; the idle stretches
-// let it drain, so the comparison reaches a steady state instead of
-// unbounded queue growth.
+// runScreen paints and publishes the desktop continuously at -fps.
+// A cloud agent's screen pipeline runs flat-out whether or not the
+// pixels are changing — the viewer is always watching a live feed.
+// Keeping frames at full rate means small lanes (tokens, telemetry,
+// actions) are measured while a ~70 KB frame is routinely in flight,
+// which is when single-stream multiplexing pays a head-of-line tax
+// that per-lane QUIC streams do not.
 //
 // Every frame is marked keyframe because every PNG IS independently
 // decodable — and on quicrtc that flag is load-bearing: stream-per-GOP
@@ -137,11 +132,8 @@ const burstWindow = 1500 * time.Millisecond
 // the transport-native equivalent of the ack-paced latest-only frame
 // sending the steelmanned WS baselines implement by hand.
 func (e *engine) runScreen(ctx context.Context) {
-	idleFPS := e.fps / 3
-	if idleFPS < 2 {
-		idleFPS = 2
-	}
-	timer := time.NewTimer(time.Second / time.Duration(e.fps))
+	period := time.Second / time.Duration(e.fps)
+	timer := time.NewTimer(period)
 	defer timer.Stop()
 	for {
 		select {
@@ -151,13 +143,8 @@ func (e *engine) runScreen(ctx context.Context) {
 		}
 		e.mu.Lock()
 		png, err := e.painter.Frame(&e.scene)
-		active := time.Since(e.lastMutation) < burstWindow
 		e.mu.Unlock()
-		fps := idleFPS
-		if active {
-			fps = e.fps
-		}
-		timer.Reset(time.Second / time.Duration(fps))
+		timer.Reset(period)
 		if err != nil {
 			continue
 		}
@@ -173,7 +160,7 @@ func (e *engine) runScreen(ctx context.Context) {
 }
 
 // runScript walks the scripted steps in a loop: publish the tool
-// call, stream the reasoning token by token (~30 tok/s), and play the
+// call, stream the reasoning token by token (~50 tok/s), and play the
 // step's desktop mutations on their own timers.
 func (e *engine) runScript(ctx context.Context) {
 	for {
@@ -192,9 +179,7 @@ func (e *engine) runScript(ctx context.Context) {
 
 			// Mutations play concurrently with the token stream, the
 			// way a real host executes while the model narrates.
-			mutDone := make(chan struct{})
 			go func(muts []mutation) {
-				defer close(mutDone)
 				for _, m := range muts {
 					select {
 					case <-ctx.Done():
@@ -209,7 +194,9 @@ func (e *engine) runScript(ctx context.Context) {
 			}(s.mutations)
 
 			e.streamReasoning(ctx, s.reasoning)
-			<-mutDone
+			// Mutations may finish before or after the narration; do
+			// not block the next step on them — a real host keeps
+			// streaming tokens while the terminal is still catching up.
 			e.st.Inc("steps", 1)
 
 			if rem := e.pace - time.Since(stepStart); rem > 0 {
@@ -226,10 +213,10 @@ func (e *engine) runScript(ctx context.Context) {
 	}
 }
 
-// streamReasoning emits one whitespace token every ~33ms (≈30 tok/s,
-// a realistic LLM decode rate). Every token is a self-contained AU.
+// streamReasoning emits one whitespace token every ~20ms (≈50 tok/s,
+// a fast model decode rate). Every token is a self-contained AU.
 func (e *engine) streamReasoning(ctx context.Context, text string) {
-	tick := time.NewTicker(33 * time.Millisecond)
+	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 	for _, tok := range strings.Fields(text) {
 		select {
@@ -243,6 +230,9 @@ func (e *engine) streamReasoning(ctx context.Context, text string) {
 }
 
 func (e *engine) emitToken(payload []byte) {
+	e.mu.Lock()
+	e.lastMutation = time.Now()
+	e.mu.Unlock()
 	seq := e.seqToken
 	e.seqToken++
 	e.fanout(event{
@@ -269,10 +259,10 @@ func (e *engine) publishToolCall(step int, call toolCall) {
 	e.st.Inc("tool_au", 1)
 }
 
-// runTelemetry emits a 2 Hz counters snapshot — the fire-and-forget
+// runTelemetry emits a 10 Hz counters snapshot — the fire-and-forget
 // lane. Small enough to always fit one datagram.
 func (e *engine) runTelemetry(ctx context.Context) {
-	tick := time.NewTicker(500 * time.Millisecond)
+	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		select {

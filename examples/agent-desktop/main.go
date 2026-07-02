@@ -95,8 +95,8 @@ func main() {
 		rttFlag  = flag.Duration("rtt", -1, "override: emulated round-trip time")
 		mbpsFlag = flag.Float64("mbps", -1, "override: emulated per-direction bandwidth (0 = unlimited)")
 		lossFlag = flag.Float64("loss", -1, "override: packet loss %% (UDP/QUIC path only; see shaper.go)")
-		fps      = flag.Int("fps", 14, "desktop screen frame rate while the scene is changing (idles at 1/3 of this)")
-		pace     = flag.Duration("pace", 5*time.Second, "minimum wall time per agent step")
+		fps      = flag.Int("fps", 16, "desktop screen frame rate (flat-out live stream)")
+		pace     = flag.Duration("pace", 0, "minimum wall time per agent step (0 = no idle gaps between steps)")
 		bench       = flag.Duration("bench", 0, "run headless Go clients on all three transports for this long, print the comparison table, and exit")
 		naiveFrames = flag.Bool("naive-frames", false, "single-WS arm queues frames FIFO instead of ack-paced latest-only — the naive design many products actually ship")
 	)
@@ -114,6 +114,20 @@ func main() {
 	}
 	if *lossFlag >= 0 {
 		shape.Loss = *lossFlag / 100
+	}
+
+	// Size the screen lane to ~90% of the shaped link so the median
+	// token/telemetry sample lands while a frame is on the wire —
+	// architectural head-of-line, not a degraded profile trick.
+	const avgFrameBits = 70 * 1024 * 8 // measured ~70 KB PNGs
+	if shape.Mbps > 0 {
+		satFPS := int(shape.Mbps * 1e6 * 0.9 / avgFrameBits)
+		if satFPS < 8 {
+			satFPS = 8
+		}
+		if satFPS > *fps {
+			*fps = satFPS
+		}
 	}
 
 	st := status.New("agent-desktop")

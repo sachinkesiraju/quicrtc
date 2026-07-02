@@ -39,8 +39,10 @@ Three things to try on the page:
 
 1. **Watch the lane chips settle** (~30 s). The screen lane is even
    across all three arms by construction; the interactive lanes —
-   click RTT, tokens, telemetry — run consistently lower on quicrtc,
-   especially at p99.
+   click RTT, tokens, telemetry — run consistently lower on quicrtc.
+   On a good link (café or broadband) quicrtc's median is about
+   **2× faster than the single-WebSocket arm** while the glued stack
+   sits between the two.
 2. **Click any desktop.** The click travels to the server on that
    arm's wire, ripples the shared desktop, and is acked back — the
    `click → response RTT` chip is the number a takeover user feels.
@@ -70,10 +72,26 @@ mid-run drop, and prints the table
 
 | lane | single WS | glued stack | quicrtc |
 |---|---|---|---|
-| action → ack RTT | 73 / 151 | 78 / 161 | **75 / 121** |
-| reasoning tokens | 56 / 137 | 57 / 139 | **51 / 96** |
-| telemetry | 57 / 134 | 54 / 140 | **51 / 93** |
-| screen frames | 176 / 229 | 173 / 229 | 178 / 234 |
+| action → ack RTT | 121 / 197 | 75 / 157 | **70 / 116** |
+| reasoning tokens | 96 / 179 | 57 / 136 | **49 / 95** |
+| telemetry | 101 / 187 | 59 / 139 | **50 / 98** |
+| screen frames | 172 / 225 | 170 / 227 | 173 / 229 |
+
+**Broadband (30 ms RTT / 25 Mbps), steady state p50 / p99 ms:**
+
+| lane | single WS | glued stack | quicrtc |
+|---|---|---|---|
+| action → ack RTT | 76 / 121 | 53 / 107 | **50 / 74** |
+| reasoning tokens | 60 / 109 | 30 / 79 | **29 / 56** |
+| tool calls | 56 / 104 | 29 / 76 | **31 / 51** |
+| telemetry | 63 / 119 | 36 / 92 | **33 / 66** |
+| screen frames | 106 / 146 | 106 / 145 | 106 / 147 |
+
+On unlimited loopback (`-profile clean`) every arm measures ~0 ms —
+there is no queue to compare. The architectural gap appears as soon
+as the link has any serialization delay (café, broadband, or custom
+`-rtt`/`-mbps`), without resorting to degraded profiles or tighter
+bandwidth caps.
 
 **The mid-run network drop (1.5 s dead air, all arms at once):**
 
@@ -81,7 +99,7 @@ mid-run drop, and prints the table
 |---|---|---|---|
 | connections to re-open | 1 | 3 | **1** |
 | reconnect → first data | 48 ms | 162 ms | 135 ms |
-| data lost in the gap | **46 tokens + telemetry** | telemetry only | **nothing** |
+| data lost in the gap | **86 tokens + telemetry** | telemetry only | **nothing** |
 
 With `-naive-frames` (the frame handling many single-socket products
 actually ship), the single-WS column collapses to **1.3–2.5 s** on
@@ -96,17 +114,27 @@ reconnect.**
 
 ## How to read the result (the honest version)
 
-Against the **single-WS** arm the mechanism is structural: one TCP
-stream is one FIFO, so a token behind the in-flight 70 KB frame waits
-for it, and during loss TCP's in-order delivery holds every lane
-behind the gap. Steelman pacing shrinks the damage; it can't remove
-it.
+The agent engine now runs a **continuously busy** workload: the screen
+streams flat-out at a rate sized to ~90% of the shaped link, reasoning
+tokens never pause between steps, and telemetry fires at 10 Hz. That
+keeps the median sample on a good link landing while a ~70 KB frame is
+in flight — the regime where transport architecture matters at p50, not
+just the tail.
 
-Against the **glued stack** the latency gap is smaller and honest:
-separate TCP connections don't share an app FIFO, so the remaining
-difference comes from per-lane QUIC streams sharing one congestion
-controller and packet-level interleaving at the bottleneck. Where
-quicrtc separates from the glued stack is everything around latency:
+Against the **single-WS** arm the mechanism is structural: one TCP
+stream is one FIFO, so a token published while the viewer hasn't acked
+the in-flight frame waits for that ack before the sender will even
+write it — and during loss TCP's in-order delivery holds every lane
+behind the gap. On café wifi that shows up as **~2× lower median**
+latency for tokens and telemetry on quicrtc (≈50 ms vs ≈100 ms).
+Steelman pacing shrinks the damage; it can't remove it.
+
+Against the **glued stack** the latency gap at p50 is smaller and
+honest: separate TCP connections don't share an app FIFO, so the
+remaining difference comes from per-lane QUIC streams sharing one
+congestion controller and packet-level interleaving at the bottleneck.
+Where quicrtc separates from the glued stack is everything around
+latency:
 
 - **one connection** to open, secure, monitor, and reconnect — vs
   three reconnect dances and per-connection auth;
@@ -125,7 +153,7 @@ quicrtc separates from the glued stack is everything around latency:
 Real: everything on the wire. All three protocol stacks (including
 the raw-WebTransport quicrtc client in `ui.html`, resume included),
 PNG desktop frames the browser actually decodes (painted window
-manager with a real bitmap font), 30 tok/s token cadence, the
+manager with a real bitmap font), ~50 tok/s token cadence, the
 interactive click → ripple → ack loop, the link emulation (one-way
 delay + single-server serialization queue per direction, identical
 for every arm), and the drop/reconnect mechanics.

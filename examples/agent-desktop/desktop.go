@@ -111,9 +111,8 @@ type desktopPainter struct {
 func newDesktopPainter() *desktopPainter {
 	return &desktopPainter{
 		img: image.NewNRGBA(image.Rect(0, 0, deskW, deskH)),
-		// BestSpeed keeps encode well under the frame budget at 12fps
-		// and, as a side effect, compresses about like a real capture
-		// pipeline would.
+		// BestSpeed keeps encode well under the frame budget and
+		// compresses about like a real capture pipeline would.
 		enc: png.Encoder{CompressionLevel: png.BestSpeed},
 	}
 }

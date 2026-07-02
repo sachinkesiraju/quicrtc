@@ -319,7 +319,7 @@ class AgentSession {
     b.style.left = `${x}px`;
     b.style.top = `${y}px`;
     this.overlay.appendChild(b);
-    setTimeout(() => b.remove(), 1400);
+    setTimeout(() => b.remove(), 2400);
   }
 
   // The number the gauge shows: the worse of (last resolved control latency)
@@ -344,14 +344,16 @@ class AgentSession {
     let level: 'good' | 'slow' | 'bad' = 'good';
     if (lat == null) {
       this.gaugeNum.textContent = '—';
+      this.gaugeUnit.textContent = '';
       this.gaugeVerdict.textContent = 'waiting…';
     } else {
-      this.gaugeNum.textContent = lat < 1000 ? lat.toFixed(0) : (lat / 1000).toFixed(1);
-      this.gaugeUnit.textContent = lat < 1000 ? 'ms' : 's';
-      if (lat > 200) level = 'bad';
-      else if (lat > 60) level = 'slow';
-      this.gaugeVerdict.textContent =
-        level === 'good' ? 'Instant \u2713' : level === 'slow' ? 'Lagging' : 'Frozen \u2717';
+      const f = formatLatency(lat);
+      this.gaugeNum.textContent = f.text;
+      this.gaugeUnit.textContent = f.unit;
+      if (lat > 1500) { level = 'bad'; this.gaugeVerdict.textContent = 'Frozen \u2717'; }
+      else if (lat > 200) { level = 'bad'; this.gaugeVerdict.textContent = 'Lagging \u2717'; }
+      else if (lat > 60) { level = 'slow'; this.gaugeVerdict.textContent = 'Lagging'; }
+      else { level = 'good'; this.gaugeVerdict.textContent = 'Instant \u2713'; }
     }
     this.gauge.dataset.level = level;
 
@@ -461,13 +463,18 @@ function renderScoreboard(now: number): void {
     return;
   }
   const factor = std / qr;
+  const stdF = formatLatency(std);
+  const qrF = formatLatency(qr);
   if (factor >= 1.5) {
-    els.ratio.textContent = `${factor.toFixed(factor >= 10 ? 0 : 1)}\u00d7`;
-    els.ratioSub.textContent = 'quicrtc is more responsive right now';
+    // Cap the headline so a fully-frozen lane reads as a credible ">100x"
+    // rather than an unbelievable four-digit multiple.
+    els.ratio.textContent = factor > 100 ? '100\u00d7+' : `${factor.toFixed(factor >= 10 ? 0 : 1)}\u00d7`;
+    els.ratioSub.textContent =
+      `quicrtc ${qrF.text}${qrF.unit} vs standard ${stdF.text}${stdF.unit} \u2014 more responsive right now`;
     els.scoreboard.dataset.state = 'win';
   } else {
     els.ratio.textContent = 'even';
-    els.ratioSub.textContent = 'no contention yet — drive the desktop harder';
+    els.ratioSub.textContent = 'no contention yet \u2014 drive the desktop harder';
     els.scoreboard.dataset.state = 'even';
   }
 }
@@ -497,6 +504,15 @@ function parseShareUrl(raw: string): { url: string; slug: string; certHash: stri
 function showError(msg: string): void {
   els.connectError.textContent = msg;
   els.connectError.hidden = false;
+}
+
+// Human-friendly latency: ms under a second, one decimal of seconds up to
+// ~9s, then a capped ">9s" so a totally-frozen lane doesn't print a silly
+// two-digit second count.
+function formatLatency(ms: number): { text: string; unit: string } {
+  if (ms < 1000) return { text: ms.toFixed(0), unit: 'ms' };
+  if (ms < 9500) return { text: (ms / 1000).toFixed(1), unit: 's' };
+  return { text: '9+', unit: 's' };
 }
 
 function clampRate(n: number): number { return Math.max(1, Math.min(60, n)); }

@@ -131,16 +131,16 @@ input[type=number] { width: 90px; }
 .click-badge {
   position: absolute; transform: translate(-50%, -140%);
   font-size: 12px; font-weight: 700; padding: 3px 8px; border-radius: 6px;
-  color: #04110a; animation: pop 1.4s ease-out forwards; white-space: nowrap;
+  color: #04110a; animation: pop 2.4s ease-out forwards; white-space: nowrap;
 }
 .click-badge.good { background: var(--good); }
 .click-badge.slow { background: var(--slow); }
 .click-badge.bad  { background: var(--bad); color: #fff; }
 @keyframes pop {
   0% { opacity: 0; transform: translate(-50%, -110%) scale(.8); }
-  15% { opacity: 1; transform: translate(-50%, -150%) scale(1); }
-  80% { opacity: 1; }
-  100% { opacity: 0; transform: translate(-50%, -180%); }
+  8% { opacity: 1; transform: translate(-50%, -150%) scale(1); }
+  85% { opacity: 1; transform: translate(-50%, -150%); }
+  100% { opacity: 0; transform: translate(-50%, -175%); }
 }
 
 .side { display: flex; flex-direction: column; }

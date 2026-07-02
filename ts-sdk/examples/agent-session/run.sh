@@ -7,7 +7,7 @@
 #
 # Stop everything with Ctrl-C.
 #
-# The heavy desktop load (60 Hz x ~3 MB frames) is what makes the
+# The heavy desktop load (30 Hz x ~3 MB frames) is what makes the
 # contention visible WITHOUT a WAN link: on the naive side the control
 # pings queue behind desktop bytes on the single stream, so the take-
 # control latency climbs and the desktop freezes; the quicrtc side keeps
@@ -22,7 +22,7 @@ ROOT="$(cd "$TSSDK/.." && pwd)"
 
 HTTP_PORT="${HTTP_PORT:-5173}"
 # Heavy desktop stream to force contention on localhost. Override via env.
-SERVER_FLAGS="${SERVER_FLAGS:--screen-fps=60 -screen-kb=3000 -datagram-metadata -action-ms=1 -a11y-kb=1 -dom-kb=1 -perf-kb=1}"
+SERVER_FLAGS="${SERVER_FLAGS:--screen-fps=30 -screen-kb=3000 -datagram-metadata -action-ms=1 -a11y-kb=1 -dom-kb=1 -perf-kb=1}"
 
 cleanup() {
   echo

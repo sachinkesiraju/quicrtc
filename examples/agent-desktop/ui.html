@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cloud agent desktop — quicrtc vs one WebSocket</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #11151d;
+    --panel2: #161b25;
+    --border: #232a38;
+    --text: #c9d1d9;
+    --dim: #7c8794;
+    --accent: #5a96e6;
+    --green: #57c87a;
+    --yellow: #e5c05a;
+    --red: #eb645c;
+    --purple: #b284ea;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+    padding: 14px 22px 10px;
+  }
+  header h1 { font-size: 17px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header .sub { color: var(--dim); font-size: 13px; }
+  #net {
+    margin-left: auto; font-family: var(--mono); font-size: 12px;
+    color: var(--dim); background: var(--panel); border: 1px solid var(--border);
+    padding: 4px 10px; border-radius: 6px;
+  }
+  #summary {
+    display: flex; gap: 12px; flex-wrap: wrap; padding: 6px 22px 12px;
+  }
+  .headline {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 14px; min-width: 210px;
+  }
+  .headline .k { color: var(--dim); font-size: 11.5px; text-transform: uppercase; letter-spacing: .6px; }
+  .headline .v { font-family: var(--mono); font-size: 21px; font-weight: 650; margin-top: 1px; }
+  .headline .d { color: var(--dim); font-size: 12px; font-family: var(--mono); }
+  .headline .v.good { color: var(--green); }
+  main {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 22px 22px;
+  }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+  .pane {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  .pane > .bar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 14px; border-bottom: 1px solid var(--border); background: var(--panel2);
+  }
+  .pane .title { font-weight: 650; font-size: 13.5px; }
+  .pane .proto { color: var(--dim); font-size: 12px; font-family: var(--mono); }
+  .pill {
+    margin-left: auto; font-size: 11px; font-family: var(--mono);
+    padding: 2px 9px; border-radius: 999px; border: 1px solid var(--border); color: var(--dim);
+  }
+  .pill[data-s="connected"] { color: var(--green); border-color: #2c4a37; }
+  .pill[data-s="error"] { color: var(--red); border-color: #55302d; }
+  .screenwrap { position: relative; background: #05070b; }
+  canvas.screen { display: block; width: 100%; height: auto; }
+  .agebadge {
+    position: absolute; top: 10px; right: 10px; font-family: var(--mono); font-size: 12px;
+    background: rgba(5, 8, 12, .78); border: 1px solid var(--border);
+    padding: 3px 9px; border-radius: 6px; color: var(--dim);
+  }
+  .agebadge.warn { color: var(--yellow); border-color: #4d4224; }
+  .agebadge.frozen { color: var(--red); border-color: #55302d; font-weight: 700; }
+  .lanes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); }
+  .lane { background: var(--panel); padding: 8px 10px 9px; }
+  .lane .ln { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .5px; }
+  .lane .lv { font-family: var(--mono); font-size: 15.5px; font-weight: 650; margin-top: 2px; }
+  .lane .lx { font-family: var(--mono); font-size: 11px; color: var(--dim); }
+  .lv.ok { color: var(--green); } .lv.mid { color: var(--yellow); } .lv.bad { color: var(--red); }
+  .feeds { display: grid; grid-template-columns: 3fr 2fr; gap: 1px; background: var(--border); flex: 1; }
+  .feed { background: var(--panel); min-height: 128px; max-height: 170px; display: flex; flex-direction: column; }
+  .feed .fh {
+    font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .5px;
+    padding: 7px 10px 4px;
+  }
+  .tokens {
+    font-family: var(--mono); font-size: 12px; padding: 0 10px 8px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-word; flex: 1; color: #aeb9c5;
+  }
+  .tools { list-style: none; margin: 0; padding: 0 10px 8px; overflow-y: auto; flex: 1; }
+  .tools li {
+    font-family: var(--mono); font-size: 11.5px; padding: 3px 0; color: #aeb9c5;
+    border-bottom: 1px dashed #1d2430; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tools li b { color: var(--purple); font-weight: 600; }
+  footer { padding: 0 22px 26px; color: var(--dim); font-size: 12px; max-width: 1200px; }
+  footer code { font-family: var(--mono); background: var(--panel); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>cloud agent desktop</h1>
+  <span class="sub">one scripted coding agent · identical events &amp; timestamps · two wires, side by side</span>
+  <span id="net">loading…</span>
+</header>
+
+<div id="summary">
+  <div class="headline"><div class="k">reasoning token p99</div><div class="v" id="h-token">–</div><div class="d" id="h-token-d"></div></div>
+  <div class="headline"><div class="k">tool call p99</div><div class="v" id="h-tool">–</div><div class="d" id="h-tool-d"></div></div>
+  <div class="headline"><div class="k">telemetry p99</div><div class="v" id="h-tele">–</div><div class="d" id="h-tele-d"></div></div>
+  <div class="headline"><div class="k">screen p50 (both lanes carry it)</div><div class="v" id="h-screen">–</div><div class="d" id="h-screen-d"></div></div>
+</div>
+
+<main>
+  <section class="pane" id="pane-ws">
+    <div class="bar">
+      <span class="title">single WebSocket</span>
+      <span class="proto">4 lanes multiplexed on one TCP stream — today's glued stack</span>
+      <span class="pill" id="ws-state" data-s="connecting">connecting</span>
+    </div>
+    <div class="screenwrap">
+      <canvas class="screen" id="ws-canvas" width="1280" height="800"></canvas>
+      <span class="agebadge" id="ws-age">–</span>
+    </div>
+    <div class="lanes" id="ws-lanes"></div>
+    <div class="feeds">
+      <div class="feed"><div class="fh">reasoning (live tokens)</div><div class="tokens" id="ws-tokens"></div></div>
+      <div class="feed"><div class="fh">tool calls</div><ul class="tools" id="ws-tools"></ul></div>
+    </div>
+  </section>
+
+  <section class="pane" id="pane-q">
+    <div class="bar">
+      <span class="title">quicrtc</span>
+      <span class="proto">4 lanes, one QUIC connection — per-lane streams + datagrams</span>
+      <span class="pill" id="q-state" data-s="connecting">connecting</span>
+    </div>
+    <div class="screenwrap">
+      <canvas class="screen" id="q-canvas" width="1280" height="800"></canvas>
+      <span class="agebadge" id="q-age">–</span>
+    </div>
+    <div class="lanes" id="q-lanes"></div>
+    <div class="feeds">
+      <div class="feed"><div class="fh">reasoning (live tokens)</div><div class="tokens" id="q-tokens"></div></div>
+      <div class="feed"><div class="fh">tool calls</div><ul class="tools" id="q-tools"></ul></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  Latency is one-way publish→receive over a <span id="foot-net">…</span> link emulated
+  in-process for <em>both</em> transports (same RTT, same bottleneck, same queue model).
+  Server and browser share this machine's clock, so the timestamps are directly comparable.
+  The WebSocket pane is a lean binary-envelope implementation, not a strawman — its handicap
+  is structural: one TCP stream is one FIFO queue, so a 70&nbsp;KB screen frame ahead of a
+  10-byte token delays the token. quicrtc carries each lane on its own QUIC stream
+  (screen: stream-per-GOP · tokens: low-latency stream · tool calls: bidi-per-call ·
+  telemetry: datagrams), so they only share bandwidth, never a queue.
+  Headless version of this comparison: <code>go run ./examples/agent-desktop -bench 30s</code>.
+</footer>
+
+<script type="module">
+// ── stats ────────────────────────────────────────────────────────────
+const WINDOW_MS = 20000;
+
+function makeLaneStats() {
+  return { samples: [], lastSeq: -1, drops: 0, lastArrival: 0, lastLat: 0 };
+}
+function addSample(ls, latMs, seq) {
+  const now = performance.now();
+  ls.samples.push([now, latMs]);
+  while (ls.samples.length && ls.samples[0][0] < now - WINDOW_MS) ls.samples.shift();
+  if (ls.lastSeq >= 0 && seq > ls.lastSeq + 1) ls.drops += seq - ls.lastSeq - 1;
+  if (seq > ls.lastSeq) ls.lastSeq = seq;
+  ls.lastArrival = now;
+  ls.lastLat = latMs;
+}
+function pct(ls, p) {
+  if (!ls.samples.length) return null;
+  const s = ls.samples.map(x => x[1]).sort((a, b) => a - b);
+  return s[Math.floor(p * (s.length - 1))];
+}
+
+// One side of the comparison (transport-agnostic rendering + stats).
+function makeSide(prefix) {
+  const el = id => document.getElementById(prefix + '-' + id);
+  const canvas = el('canvas');
+  const side = {
+    prefix,
+    ctx: canvas.getContext('2d'),
+    canvas,
+    stats: { screen: makeLaneStats(), tokens: makeLaneStats(), tools: makeLaneStats(), telemetry: makeLaneStats() },
+    tokensEl: el('tokens'), toolsEl: el('tools'),
+    ageEl: el('age'), lanesEl: el('lanes'), stateEl: el('state'),
+    drawing: false, pendingFrame: null,
+  };
+
+  side.setState = (s) => { side.stateEl.dataset.s = s; side.stateEl.textContent = s; };
+
+  side.onFrame = (seq, ptsMicro, bytes) => {
+    addSample(side.stats.screen, oneWayMs(ptsMicro), seq);
+    // Always render the newest frame; if the decoder is busy, replace
+    // the pending one (freshness over completeness, same as a video
+    // pipeline).
+    side.pendingFrame = bytes;
+    if (!side.drawing) drainFrames(side);
+  };
+  side.onToken = (seq, ptsMicro, bytes) => {
+    addSample(side.stats.tokens, oneWayMs(ptsMicro), seq);
+    side.tokensEl.textContent = (side.tokensEl.textContent + td.decode(bytes)).slice(-1600);
+    side.tokensEl.scrollTop = side.tokensEl.scrollHeight;
+  };
+  side.onTool = (seq, ptsMicro, bytes) => {
+    addSample(side.stats.tools, oneWayMs(ptsMicro), seq);
+    let call = {};
+    try { call = JSON.parse(td.decode(bytes)); } catch {}
+    const li = document.createElement('li');
+    const args = call.cmd || call.path || call.note || '';
+    li.innerHTML = `<b>${esc(call.tool || '?')}</b> ${esc(args)}`;
+    side.toolsEl.insertBefore(li, side.toolsEl.firstChild);
+    while (side.toolsEl.childElementCount > 24) side.toolsEl.removeChild(side.toolsEl.lastChild);
+  };
+  side.onTelemetry = (seq, bytes) => {
+    let obj = {};
+    try { obj = JSON.parse(td.decode(bytes)); } catch { return; }
+    if (typeof obj.ts_us === 'number') addSample(side.stats.telemetry, oneWayMs(obj.ts_us), seq);
+  };
+  return side;
+}
+
+async function drainFrames(side) {
+  side.drawing = true;
+  while (side.pendingFrame) {
+    const bytes = side.pendingFrame;
+    side.pendingFrame = null;
+    try {
+      const bmp = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+      side.ctx.drawImage(bmp, 0, 0, side.canvas.width, side.canvas.height);
+      bmp.close();
+    } catch { /* mid-GOP join or truncated frame; next one recovers */ }
+  }
+  side.drawing = false;
+}
+
+const td = new TextDecoder();
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function oneWayMs(ptsMicro) { return Date.now() - Number(ptsMicro) / 1000; }
+
+// ── config + connect ────────────────────────────────────────────────
+const cfg = await (await fetch('/config')).json();
+const netDesc = `${cfg.profile}: rtt ${cfg.rttMs}ms · ${cfg.mbps ? cfg.mbps + ' Mbps' : 'unlimited'}${cfg.lossPct ? ' · ' + cfg.lossPct.toFixed(1) + '% loss (quic only)' : ''}`;
+document.getElementById('net').textContent = 'emulated link — ' + netDesc;
+document.getElementById('foot-net').textContent = netDesc;
+
+const wsSide = makeSide('ws');
+const qSide = makeSide('q');
+connectWS(wsSide);
+connectQuicrtc(qSide);
+
+// ── WebSocket baseline client ───────────────────────────────────────
+// Envelope: [1B lane][4B BE seq][8B BE ptsMicro][payload]
+function connectWS(side) {
+  const ws = new WebSocket(cfg.wsUrl);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => side.setState('connected');
+  ws.onerror = () => side.setState('error');
+  ws.onclose = () => { side.setState('closed'); setTimeout(() => connectWS(side), 2000); };
+  ws.onmessage = (ev) => {
+    const b = new Uint8Array(ev.data);
+    if (b.byteLength < 13) return;
+    const dv = new DataView(b.buffer, b.byteOffset, 13);
+    const lane = b[0], seq = dv.getUint32(1, false), pts = Number(dv.getBigUint64(5, false));
+    const payload = b.subarray(13);
+    dispatch(side, lane, seq, pts, payload);
+  };
+}
+
+function dispatch(side, lane, seq, pts, payload) {
+  switch (lane) {
+    case 1: side.onFrame(seq, pts, payload); break;
+    case 2: side.onToken(seq, pts, payload); break;
+    case 3: side.onTool(seq, pts, payload); break;
+    case 4: side.onTelemetry(seq, payload); break;
+  }
+}
+
+// ── quicrtc client (raw WebTransport, wire format v1) ───────────────
+// Mirrors wire/frame.go: control frames [1B type][3B BE len][payload];
+// feed frames add [8B BE pts µs][4B BE seq][1B flags] before the
+// payload. Each uni/bidi stream opens with a TypeStreamHeader (0x23)
+// naming its track; telemetry rides datagrams with a 4-byte envelope.
+const T_HELLO = 0x01, T_SDP = 0x02, T_ERROR = 0x05;
+const T_KEY = 0x20, T_P = 0x21, T_FRAME = 0x22, T_HDR = 0x23, T_DGRAM = 0x24;
+
+function b64urlToBytes(s) {
+  let b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (b64.length % 4) b64 += '=';
+  const bin = atob(b64);
+  return Uint8Array.from(bin, c => c.charCodeAt(0));
+}
+
+// byteReader buffers a ReadableStream and yields exact byte counts.
+function byteReader(stream) {
+  const reader = stream.getReader();
+  let buf = new Uint8Array(0);
+  return {
+    async take(n) {
+      while (buf.byteLength < n) {
+        const { value, done } = await reader.read();
+        if (done) return null;
+        const m = new Uint8Array(buf.byteLength + value.byteLength);
+        m.set(buf, 0); m.set(value, buf.byteLength);
+        buf = m;
+      }
+      const out = buf.subarray(0, n);
+      buf = buf.subarray(n);
+      return out;
+    },
+  };
+}
+
+async function readFeedFrames(stream, onAU) {
+  const r = byteReader(stream);
+  // Stream header (0x23) names the track; single-track senders may
+  // skip it, in which case the first byte is already a feed type.
+  let first = await r.take(1);
+  if (first === null) return;
+  let track = '';
+  if (first[0] === T_HDR) {
+    const lenB = await r.take(3);
+    if (!lenB) return;
+    const n = (lenB[0] << 16) | (lenB[1] << 8) | lenB[2];
+    const name = await r.take(n);
+    if (!name) return;
+    track = td.decode(name);
+    first = await r.take(1);
+    if (first === null) return;
+  }
+  for (;;) {
+    const typ = first[0];
+    const rest = await r.take(16); // 3B len + 8B pts + 4B seq + 1B flags
+    if (!rest) return;
+    const len = (rest[0] << 16) | (rest[1] << 8) | rest[2];
+    const dv = new DataView(rest.buffer, rest.byteOffset);
+    const pts = Number(dv.getBigUint64(3, false));
+    const seq = dv.getUint32(11, false);
+    const payload = len ? await r.take(len) : new Uint8Array(0);
+    if (payload === null) return;
+    if (typ === T_KEY || typ === T_P || typ === T_FRAME) {
+      // Copy: subarrays alias the reader's buffer, which keeps moving.
+      onAU(track, seq, pts, new Uint8Array(payload));
+    }
+    first = await r.take(1);
+    if (first === null) return;
+  }
+}
+
+async function connectQuicrtc(side) {
+  let wt;
+  try {
+    wt = new WebTransport(cfg.wtUrl, {
+      serverCertificateHashes: [{ algorithm: 'sha-256', value: b64urlToBytes(cfg.certHash) }],
+    });
+    await wt.ready;
+  } catch (e) {
+    side.setState('error');
+    console.error('webtransport:', e);
+    setTimeout(() => connectQuicrtc(side), 2000);
+    return;
+  }
+  wt.closed.then(() => { side.setState('closed'); setTimeout(() => connectQuicrtc(side), 2000); })
+           .catch(() => { side.setState('closed'); setTimeout(() => connectQuicrtc(side), 2000); });
+
+  // Control stream: HELLO out, SDP back.
+  const ctl = await wt.createBidirectionalStream();
+  const w = ctl.writable.getWriter();
+  const hello = new TextEncoder().encode(JSON.stringify({ role: 'recv', slug: cfg.slug, ver: '1' }));
+  const hdr = new Uint8Array(4 + hello.byteLength);
+  hdr[0] = T_HELLO; hdr[1] = hello.byteLength >> 16; hdr[2] = (hello.byteLength >> 8) & 0xff; hdr[3] = hello.byteLength & 0xff;
+  hdr.set(hello, 4);
+  await w.write(hdr);
+
+  const ctlR = byteReader(ctl.readable);
+  for (;;) {
+    const h = await ctlR.take(4);
+    if (!h) { side.setState('error'); return; }
+    const n = (h[1] << 16) | (h[2] << 8) | h[3];
+    const body = n ? await ctlR.take(n) : new Uint8Array(0);
+    if (h[0] === T_SDP) break;
+    if (h[0] === T_ERROR) { side.setState('error'); console.error('quicrtc:', td.decode(body)); return; }
+  }
+  side.setState('connected');
+  // Keep draining control frames (announces, kind-stats) so flow
+  // control credit keeps moving.
+  (async () => {
+    for (;;) {
+      const h = await ctlR.take(4);
+      if (!h) return;
+      const n = (h[1] << 16) | (h[2] << 8) | h[3];
+      if (n && (await ctlR.take(n)) === null) return;
+    }
+  })();
+
+  const onAU = (track, seq, pts, payload) => {
+    switch (track) {
+      case 'screen': side.onFrame(seq, pts, payload); break;
+      case 'reasoning': side.onToken(seq, pts, payload); break;
+      case 'toolcalls': side.onTool(seq, pts, payload); break;
+      case 'telemetry': side.onTelemetry(seq, payload); break;
+    }
+  };
+
+  // Uni feed streams: a fresh one per screen GOP (the previous is
+  // RESET at the next keyframe — read errors are normal), plus one
+  // persistent stream per low-latency track.
+  (async () => {
+    const uni = wt.incomingUnidirectionalStreams.getReader();
+    for (;;) {
+      const { value, done } = await uni.read();
+      if (done) return;
+      readFeedFrames(value, onAU).catch(() => {});
+    }
+  })();
+
+  // Bidi streams: one per tool call. FIN our half so the server's
+  // response read returns immediately.
+  (async () => {
+    const bidi = wt.incomingBidirectionalStreams.getReader();
+    for (;;) {
+      const { value, done } = await bidi.read();
+      if (done) return;
+      value.writable.close().catch(() => {});
+      readFeedFrames(value.readable, onAU).catch(() => {});
+    }
+  })();
+
+  // Datagrams: telemetry envelope [0x24][trackID][2B seq][payload].
+  (async () => {
+    const dg = wt.datagrams.readable.getReader();
+    for (;;) {
+      const { value, done } = await dg.read();
+      if (done) return;
+      if (value.byteLength < 4 || value[0] !== T_DGRAM) continue;
+      const seq = (value[2] << 8) | value[3];
+      side.onTelemetry(seq, value.subarray(4));
+    }
+  })();
+}
+
+// ── render loop: lane chips, age badges, headline ───────────────────
+const LANES = [
+  ['tokens', 'tokens'], ['tools', 'tool calls'], ['telemetry', 'telemetry'], ['screen', 'screen'],
+];
+for (const side of [wsSide, qSide]) {
+  side.lanesEl.innerHTML = LANES.map(([key]) =>
+    `<div class="lane"><div class="ln"></div><div class="lv" id="${side.prefix}-lv-${key}">–</div><div class="lx" id="${side.prefix}-lx-${key}"></div></div>`
+  ).join('');
+  LANES.forEach(([key, label], i) => {
+    side.lanesEl.children[i].querySelector('.ln').textContent = label + ' p50 / p99';
+  });
+}
+
+function fmtMs(v) { return v === null ? '–' : v < 10 ? v.toFixed(1) : Math.round(v).toString(); }
+function grade(v) { return v === null ? '' : v < 120 ? 'ok' : v < 450 ? 'mid' : 'bad'; }
+
+function renderSide(side) {
+  for (const [key] of LANES) {
+    const ls = side.stats[key];
+    const p50 = pct(ls, 0.5), p99 = pct(ls, 0.99);
+    const lv = document.getElementById(`${side.prefix}-lv-${key}`);
+    lv.textContent = `${fmtMs(p50)} / ${fmtMs(p99)} ms`;
+    lv.className = 'lv ' + grade(p99);
+    const lx = document.getElementById(`${side.prefix}-lx-${key}`);
+    lx.textContent = ls.drops ? `${ls.drops} dropped` : '';
+  }
+  const scr = side.stats.screen;
+  if (scr.lastArrival) {
+    const age = performance.now() - scr.lastArrival;
+    const behind = scr.lastLat;
+    if (age > 1500) {
+      side.ageEl.textContent = `FROZEN ${(age / 1000).toFixed(1)}s`;
+      side.ageEl.className = 'agebadge frozen';
+    } else {
+      side.ageEl.textContent = `screen behind by ${fmtMs(behind)} ms`;
+      side.ageEl.className = 'agebadge' + (behind > 450 ? ' warn' : '');
+    }
+  }
+}
+
+function headline(id, wsLs, qLs, p) {
+  const a = pct(wsLs, p), b = pct(qLs, p);
+  const v = document.getElementById('h-' + id), d = document.getElementById('h-' + id + '-d');
+  if (a === null || b === null) { v.textContent = '–'; d.textContent = 'measuring…'; return; }
+  const ratio = a / b;
+  v.textContent = ratio >= 1.15 ? ratio.toFixed(1) + '× lower' : '≈ even';
+  v.className = 'v' + (ratio >= 1.15 ? ' good' : '');
+  d.textContent = `ws ${fmtMs(a)} ms → quicrtc ${fmtMs(b)} ms`;
+}
+
+setInterval(() => {
+  renderSide(wsSide);
+  renderSide(qSide);
+  headline('token', wsSide.stats.tokens, qSide.stats.tokens, 0.99);
+  headline('tool', wsSide.stats.tools, qSide.stats.tools, 0.99);
+  headline('tele', wsSide.stats.telemetry, qSide.stats.telemetry, 0.99);
+  headline('screen', wsSide.stats.screen, qSide.stats.screen, 0.5);
+}, 500);
+</script>
+</body>
+</html>

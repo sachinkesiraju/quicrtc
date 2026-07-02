@@ -82,7 +82,7 @@
   .lane .lx { font-family: var(--mono); font-size: 11px; color: var(--dim); }
   .lv.ok { color: var(--green); } .lv.mid { color: var(--yellow); } .lv.bad { color: var(--red); }
   .feeds { display: grid; grid-template-columns: 3fr 2fr; gap: 1px; background: var(--border); flex: 1; }
-  .feed { background: var(--panel); min-height: 128px; max-height: 170px; display: flex; flex-direction: column; }
+  .feed { background: var(--panel); min-height: 128px; max-height: 170px; display: flex; flex-direction: column; min-width: 0; }
   .feed .fh {
     font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .5px;
     padding: 7px 10px 4px;
@@ -209,10 +209,14 @@ function makeSide(prefix) {
     side.pendingFrame = bytes;
     if (!side.drawing) drainFrames(side);
   };
+  side.tokenBuf = '';
   side.onToken = (seq, ptsMicro, bytes) => {
     addSample(side.stats.tokens, oneWayMs(ptsMicro), seq);
-    side.tokensEl.textContent = (side.tokensEl.textContent + td.decode(bytes)).slice(-1600);
-    side.tokensEl.scrollTop = side.tokensEl.scrollHeight;
+    // Buffer text and flush to the DOM at 10 Hz (see flushTokens):
+    // per-token textContent+scrollTop updates force a layout each,
+    // and at 30 tok/s × 2 panes that main-thread cost would pollute
+    // the latency measurement itself.
+    side.tokenBuf += td.decode(bytes);
   };
   side.onTool = (seq, ptsMicro, bytes) => {
     addSample(side.stats.tools, oneWayMs(ptsMicro), seq);
@@ -502,6 +506,15 @@ function headline(id, wsLs, qLs, p) {
   v.className = 'v' + (ratio >= 1.15 ? ' good' : '');
   d.textContent = `ws ${fmtMs(a)} ms → quicrtc ${fmtMs(b)} ms`;
 }
+
+setInterval(() => {
+  for (const side of [wsSide, qSide]) {
+    if (!side.tokenBuf) continue;
+    side.tokensEl.textContent = (side.tokensEl.textContent + side.tokenBuf).slice(-1600);
+    side.tokenBuf = '';
+    side.tokensEl.scrollTop = side.tokensEl.scrollHeight;
+  }
+}, 100);
 
 setInterval(() => {
   renderSide(wsSide);

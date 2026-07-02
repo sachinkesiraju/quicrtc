@@ -10,6 +10,7 @@
 /wan_bench-linux-amd64
 # compiled example binaries (named after their dir/package)
 /replay
+/agent-desktop
 /examples/cua-live/cua-live
 # cross-compiled wan_bench binary (lives in the package dir, any GOOS/GOARCH)
 testing/wan_bench/wan_bench

@@ -43,13 +43,14 @@ type sink interface {
 type engine struct {
 	painter *desktopPainter
 	steps   []step
-	fps     int
+	fps     int           // burst frame rate, while the desktop is changing
 	pace    time.Duration // extra dwell per step so the demo is watchable
 	st      *status.Status
 
-	mu    sync.Mutex
-	scene scene
-	sinks []sink
+	mu           sync.Mutex
+	scene        scene
+	sinks        []sink
+	lastMutation time.Time
 
 	seqScreen uint32
 	seqToken  uint32
@@ -100,32 +101,50 @@ func (e *engine) run(ctx context.Context) {
 	wg.Wait()
 }
 
-// runScreen paints and publishes the desktop at the configured fps,
-// continuously — the "agent's screen is always streaming" signal that
-// creates the bandwidth contention the comparison is about. Keyframe
-// cadence is 1s (PNG frames are all self-contained; the flag drives
-// quicrtc's stream-per-GOP rotation).
+// burstWindow is how long after the last desktop mutation the screen
+// keeps capturing at the burst rate before dropping to the idle rate.
+const burstWindow = 1500 * time.Millisecond
+
+// runScreen paints and publishes the desktop continuously — the
+// "agent's screen is always streaming" signal. The capture rate is
+// activity-driven, like a real screen pipeline: full rate (-fps)
+// while the desktop is changing (terminal output landing, editor
+// edits, CI updates), ~1/3 rate when the scene is static. The bursts
+// are what periodically saturate the emulated link; the idle stretches
+// let it drain, so the comparison reaches a steady state instead of
+// unbounded queue growth. Keyframe cadence is every 10 frames (PNG
+// frames are all self-contained; the flag drives quicrtc's
+// stream-per-GOP rotation).
 func (e *engine) runScreen(ctx context.Context) {
-	tick := time.NewTicker(time.Second / time.Duration(e.fps))
-	defer tick.Stop()
+	idleFPS := e.fps / 3
+	if idleFPS < 2 {
+		idleFPS = 2
+	}
+	timer := time.NewTimer(time.Second / time.Duration(e.fps))
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
+		case <-timer.C:
 		}
 		e.mu.Lock()
 		png, err := e.painter.Frame(&e.scene)
+		active := time.Since(e.lastMutation) < burstWindow
 		e.mu.Unlock()
+		fps := idleFPS
+		if active {
+			fps = e.fps
+		}
+		timer.Reset(time.Second / time.Duration(fps))
 		if err != nil {
 			continue
 		}
 		seq := e.seqScreen
 		e.seqScreen++
-		keyframe := seq%uint32(e.fps) == 0
 		e.fanout(event{
 			lane: laneScreen, seq: seq, ptsMicro: nowMicro(),
-			keyframe: keyframe, payload: png,
+			keyframe: seq%10 == 0, payload: png,
 		})
 		e.st.Inc("screen_au", 1)
 		e.st.Inc("screen_bytes", int64(len(png)))
@@ -163,6 +182,7 @@ func (e *engine) runScript(ctx context.Context) {
 					}
 					e.mu.Lock()
 					m.apply(&e.scene)
+					e.lastMutation = time.Now()
 					e.mu.Unlock()
 				}
 			}(s.mutations)

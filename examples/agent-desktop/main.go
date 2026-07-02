@@ -90,7 +90,7 @@ func main() {
 		rttFlag  = flag.Duration("rtt", -1, "override: emulated round-trip time")
 		mbpsFlag = flag.Float64("mbps", -1, "override: emulated per-direction bandwidth (0 = unlimited)")
 		lossFlag = flag.Float64("loss", -1, "override: packet loss %% (UDP/QUIC path only; see shaper.go)")
-		fps      = flag.Int("fps", 10, "desktop screen frame rate")
+		fps      = flag.Int("fps", 14, "desktop screen frame rate while the scene is changing (idles at 1/3 of this)")
 		pace     = flag.Duration("pace", 5*time.Second, "minimum wall time per agent step")
 		bench    = flag.Duration("bench", 0, "run headless Go clients on both transports for this long, print the comparison table, and exit")
 	)
@@ -215,14 +215,18 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(cfg)
 	})
-	uiServer := &http.Server{Addr: *httpAddr, Handler: uiMux, ReadHeaderTimeout: 5 * time.Second}
-	go func() {
-		err := uiServer.ListenAndServe()
-		if err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
-			log.Fatalf("ui server: %v (is %s already in use?)", err, *httpAddr)
-		}
-	}()
-	defer func() { _ = uiServer.Close() }()
+	// Bench mode is browserless; don't occupy the UI port so a live
+	// demo and a bench run can coexist.
+	if *bench == 0 {
+		uiServer := &http.Server{Addr: *httpAddr, Handler: uiMux, ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			err := uiServer.ListenAndServe()
+			if err != nil && !errors.Is(err, http.ErrServerClosed) && ctx.Err() == nil {
+				log.Fatalf("ui server: %v (is %s already in use?)", err, *httpAddr)
+			}
+		}()
+		defer func() { _ = uiServer.Close() }()
+	}
 
 	// ── the agent engine, fanning out to both transports ──
 	eng := newEngine(*fps, *pace, st)
@@ -231,14 +235,16 @@ func main() {
 	go eng.run(ctx)
 
 	fmt.Printf("agent-desktop — cloud agent desktop over quicrtc vs a single WebSocket\n")
-	fmt.Printf("  open       http://%s\n", *httpAddr)
+	if *bench == 0 {
+		fmt.Printf("  open       http://%s\n", *httpAddr)
+	}
 	fmt.Printf("  network    %s (rtt=%v, bw=%s, loss=%.1f%%)\n",
 		*profile, shape.RTT, mbpsStr(shape.Mbps), shape.Loss*100)
 	fmt.Printf("  quicrtc    %s\n", shareURL)
 	fmt.Printf("  websocket  %s\n", wsURL)
 
 	if *bench > 0 {
-		if err := runBench(ctx, shareURL, wsURL, *bench, st); err != nil {
+		if err := runBench(ctx, shareURL, wsURL, *bench); err != nil {
 			log.Fatalf("bench: %v", err)
 		}
 		return

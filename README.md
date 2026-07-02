@@ -30,6 +30,19 @@ A track's `Kind` picks its wire shape. Video bursts and the token stream sit on 
 | **Browser client** | heavy | **~18 KB gzipped** | zero dependencies |
 | **Recording / replay** | a 5th system | **built in** | on one capture clock |
 
+## See it
+
+One command runs the flagship demo — a cloud coding agent's desktop (screen, reasoning tokens, tool calls, telemetry) streamed to your browser over quicrtc and over a single WebSocket **side by side**, through the same emulated café-wifi link, with live per-lane latency:
+
+```bash
+go run ./examples/agent-desktop
+# open http://127.0.0.1:8420
+```
+
+<p align="center"><img src="docs/assets/agent_desktop.png" alt="Side-by-side cloud agent desktops: single WebSocket vs quicrtc, with per-lane latency chips" width="820"></p>
+
+The screen lane (~6 Mbps of desktop frames) stays roughly even — both transports carry the same bulk bytes through the same bottleneck. The agent's *interactive* lanes are where the architecture shows: reasoning tokens, tool calls, and telemetry stop queueing behind the screen share and arrive **3–10× faster at p99** ([details + headless bench mode](examples/agent-desktop/)).
+
 ## Performance
 
 Same workload, same machine, same network, baseline and quicrtc back to back. Lower is better. Loopback rows use a synthetic 50 ms RTT; WAN rows run on two GCP VMs across US regions (~64 ms RTT). [Full methodology](testing/benchmarks/METHODOLOGY.md).
@@ -89,7 +102,7 @@ const tokens = await client.recvOn('reasoning');
 console.log(new TextDecoder().decode(tokens.bytes));
 ```
 
-Runnable: [`examples/publisher/`](examples/publisher/) (server) and [`ts-sdk/examples/viewer/`](ts-sdk/examples/viewer/) (a browser viewer driving all four lanes at once). A real Claude computer-use loop lives in [`examples/cua-live/`](examples/cua-live/) (`go run . -fake`, zero setup); the native relay and a session-replay scrubber are in [`examples/`](examples/) and [`ts-sdk/examples/`](ts-sdk/examples/). Deploying? See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Stuck? [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
+Runnable: [`examples/agent-desktop/`](examples/agent-desktop/) (the flagship side-by-side demo above), [`examples/publisher/`](examples/publisher/) (minimal server) and [`ts-sdk/examples/viewer/`](ts-sdk/examples/viewer/) (a browser viewer driving all four lanes at once). A real Claude computer-use loop lives in [`examples/cua-live/`](examples/cua-live/) (`go run . -fake`, zero setup); the native relay and a session-replay scrubber are in [`examples/`](examples/) and [`ts-sdk/examples/`](ts-sdk/examples/). Deploying? See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md). Stuck? [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md).
 
 ## FAQ
 

@@ -3,6 +3,22 @@
 End-to-end examples for the Go server + client APIs. Each builds on the
 previous; read in order.
 
+## Start here: the flagship demo
+
+**agent-desktop** — a cloud coding agent's
+desktop streamed to your browser over quicrtc and over a single
+WebSocket *side by side*, through the same emulated network, with
+live per-lane latency. One command, zero setup:
+
+```bash
+go run ./examples/agent-desktop          # open http://127.0.0.1:8420
+go run ./examples/agent-desktop -bench 30s   # browserless comparison table
+```
+
+See [agent-desktop/README.md](agent-desktop/README.md) for the
+measured numbers and the honest-comparison methodology. The examples
+below then build the same machinery up piece by piece.
+
 ## Examples (reading order)
 
 1. **publisher** + **subscriber** —
@@ -52,6 +68,7 @@ headline above its boxed summary on Ctrl-C.
 
 | Example       | Real on the wire                                       | Mocked                                            |
 |---------------|--------------------------------------------------------|---------------------------------------------------|
+| agent-desktop | both full protocol stacks + emulated link, real PNG desktop, measured per-lane latency | the agent's reasoning + action script (no model)  |
 | publisher     | QUIC + WT, one track, synthetic AUs                    | "synthetic" codec (random bytes), clearly labeled |
 | subscriber    | reads what publisher sent                              | —                                                 |
 | agent_pubsub  | 4 channels, per-Kind dispatch, real PNG screen         | agent reasoning sentences + tool-call list        |

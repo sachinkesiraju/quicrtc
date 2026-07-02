@@ -20,7 +20,6 @@ import (
 	"golang.org/x/net/websocket"
 
 	"github.com/sachinkesiraju/quicrtc/client"
-	"github.com/sachinkesiraju/quicrtc/examples/internal/status"
 	"github.com/sachinkesiraju/quicrtc/wire"
 )
 
@@ -97,7 +96,7 @@ func latMs(ptsMicro uint64) float64 {
 
 // runBench connects both clients, samples for dur (after a short
 // warmup), prints the table, and returns.
-func runBench(ctx context.Context, shareURL, wsURL string, dur time.Duration, st *status.Status) error {
+func runBench(ctx context.Context, shareURL, wsURL string, dur time.Duration) error {
 	fmt.Printf("\nbench: sampling both transports for %v (plus 3s warmup)…\n", dur)
 
 	benchCtx, cancel := context.WithCancel(ctx)

@@ -29,7 +29,7 @@ const (
 	titleH   = 26
 	statusH  = 38
 	statusY  = deskH - statusH - 14
-	grainAmp = 14 // wallpaper noise amplitude; keeps PNG size screenshot-realistic
+	grainAmp = 11 // wallpaper noise amplitude; keeps PNG size screenshot-realistic
 )
 
 // Palette.
@@ -215,16 +215,16 @@ func (p *desktopPainter) paintWallpaper() {
 	t := p.tick / 4
 	for y := 0; y < deskH; y++ {
 		fy := float64(y) / deskH
-		baseR := 18 + int(30*fy)
-		baseG := 16 + int(10*fy)
-		baseB := 38 + int(34*fy)
+		baseR := 15 + int(14*fy)
+		baseG := 17 + int(10*fy)
+		baseB := 30 + int(26*fy)
 		row := img.Pix[img.PixOffset(0, y) : img.PixOffset(0, y)+deskW*4]
 		for x := 0; x < deskW; x++ {
 			n := int(hash3(uint32(x>>2), uint32(y>>2), t)%uint32(2*grainAmp+1)) - grainAmp
 			off := x * 4
 			row[off+0] = clamp8(baseR + n)
 			row[off+1] = clamp8(baseG + n)
-			row[off+2] = clamp8(baseB + n)
+			row[off+2] = clamp8(baseB + n*2)
 			row[off+3] = 255
 		}
 	}

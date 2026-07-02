@@ -49,10 +49,14 @@ type Shape struct {
 func (s Shape) zero() bool { return s.RTT == 0 && s.Mbps == 0 && s.Loss == 0 }
 
 // pacerQueueLen bounds each direction's bottleneck queue. At ~1300 B
-// per QUIC packet this is ~330 KB of buffer — a few hundred ms at the
-// demo's default bandwidth, i.e. a realistic (slightly bloated) home
-// router, not an infinite queue that would hide loss entirely.
-const pacerQueueLen = 256
+// per QUIC packet this is ~85 KB of buffer — ~85 ms at the demo's
+// default 8 Mbps, a realistic access-point queue. The size matters:
+// a deep queue would itself add hundreds of ms of FIFO bufferbloat to
+// EVERY flow and mask the transports' own behavior; a shallow one
+// lets congestion control (QUIC's and TCP's alike) find the link rate
+// and keep the standing queue small, so the latency the demo measures
+// is the transports' queueing, not the router's.
+const pacerQueueLen = 64
 
 // pacer is one direction of one emulated link, split into two stages
 // so propagation is pipelined the way a real wire is:
@@ -68,11 +72,11 @@ const pacerQueueLen = 256
 //	                     monotonic and the delay is constant, sleeping
 //	                     sequentially preserves order.
 type pacer struct {
-	shape   Shape
-	ch      chan []byte
+	shape    Shape
+	ch       chan []byte
 	inFlight chan timedPacket
-	write   func([]byte)
-	done    chan struct{}
+	write    func([]byte)
+	done     chan struct{}
 }
 
 type timedPacket struct {
@@ -82,11 +86,11 @@ type timedPacket struct {
 
 func newPacer(shape Shape, write func([]byte)) *pacer {
 	p := &pacer{
-		shape:   shape,
-		ch:      make(chan []byte, pacerQueueLen),
+		shape:    shape,
+		ch:       make(chan []byte, pacerQueueLen),
 		inFlight: make(chan timedPacket, pacerQueueLen),
-		write:   write,
-		done:    make(chan struct{}),
+		write:    write,
+		done:     make(chan struct{}),
 	}
 	go p.runWire()
 	go p.runDelivery()

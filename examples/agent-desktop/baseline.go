@@ -55,7 +55,6 @@ type wsHub struct {
 
 type wsClient struct {
 	queue chan []byte
-	done  chan struct{}
 }
 
 const wsClientQueue = 1024
@@ -99,7 +98,7 @@ func (h *wsHub) Handler() http.Handler {
 
 func (h *wsHub) serve(ws *websocket.Conn) {
 	ws.PayloadType = websocket.BinaryFrame
-	c := &wsClient{queue: make(chan []byte, wsClientQueue), done: make(chan struct{})}
+	c := &wsClient{queue: make(chan []byte, wsClientQueue)}
 	h.mu.Lock()
 	h.clients[c] = struct{}{}
 	h.mu.Unlock()
@@ -108,7 +107,6 @@ func (h *wsHub) serve(ws *websocket.Conn) {
 		h.mu.Lock()
 		delete(h.clients, c)
 		h.mu.Unlock()
-		close(c.done)
 		_ = ws.Close()
 	}()
 

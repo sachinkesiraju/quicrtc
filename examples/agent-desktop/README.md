@@ -5,116 +5,162 @@ works a task on its remote desktop: reproduce a failing test, find
 the rounding bug, patch it, re-run the suite, open a PR, watch CI go
 green. Its **screen, reasoning tokens, tool calls, and telemetry**
 are produced once by one agent engine and streamed to your browser
-over **two transports at the same time**:
+over **three transports at the same time**, rendered side by side
+with live per-lane latency:
 
-| pane | transport | wire shape |
+| pane | transport | what it models |
 |---|---|---|
-| left | **single WebSocket** | all four lanes multiplexed on one TCP stream — the glued stack most agent products ship today |
-| right | **quicrtc** | four lanes on one QUIC/WebTransport connection — screen on stream-per-GOP, tokens on a low-latency stream, tool calls on bidi-per-call streams, telemetry on datagrams |
+| left | **single WebSocket** | all four lanes multiplexed on one TCP stream — single-gateway products (noVNC-class desktop streaming, firewall-friendly one-connection designs) |
+| middle | **glued stack** | frames on their own WebSocket, tokens on SSE, tool calls + telemetry + input on an events WebSocket — what well-engineered agent products ship today |
+| right | **quicrtc** | four lanes plus an input lane on **one** QUIC/WebTransport connection — screen on stream-per-GOP, tokens on a low-latency stream, tool calls on bidi-per-call streams, telemetry on datagrams, input on publish-back |
 
-Both connections run through the **same in-process emulated link**
-(default: café wifi — 40 ms RTT, 8 Mbps, shared queue model), every
-event carries the same publish timestamp, and the page renders the
-two desktops side by side with live per-lane latency. The only
-variable is the wire.
+Every arm gets its **own identical emulated link** (default: café
+wifi — 40 ms RTT, 8 Mbps, shared single-bottleneck queue; within the
+glued arm its three connections share one link, like one user's
+wifi). Every event carries the same publish timestamp. All three
+arms run the **identical latest-frame-wins screen protocol** — the
+WS arms via an ack message, quicrtc via a publish-back receipts
+track — so the bulk lane is a controlled variable and the
+interactive lanes are the experiment.
 
-<p align="center"><img src="../../docs/assets/agent_desktop.png" alt="Side-by-side cloud agent desktops: single WebSocket vs quicrtc, with per-lane latency chips" width="820"></p>
+<p align="center"><img src="../../docs/assets/agent_desktop.png" alt="Three cloud agent desktops side by side: single WebSocket, glued stack, quicrtc — with per-lane latency chips and drop-recovery readouts" width="900"></p>
 
 ## Run it
 
-One binary serves the page, both transports, and the emulated
-network. No API key, no npm build, no browser automation:
+One binary serves the page, all three transports, and the emulated
+networks. No API key, no npm build, no browser automation:
 
 ```bash
 go run ./examples/agent-desktop
 # open http://127.0.0.1:8420
 ```
 
-Within ~30 seconds the headline strip settles: reasoning tokens,
-tool calls, and telemetry arrive several times faster over quicrtc,
-while the screen lane — the bulk traffic both transports carry
-identically — stays roughly even. That asymmetry is the point: the
-agent's *interactive* output stops queueing behind its own
-screen share.
+Three things to try on the page:
+
+1. **Watch the lane chips settle** (~30 s). The screen lane is even
+   across all three arms by construction; the interactive lanes —
+   click RTT, tokens, telemetry — run consistently lower on quicrtc,
+   especially at p99.
+2. **Click any desktop.** The click travels to the server on that
+   arm's wire, ripples the shared desktop, and is acked back — the
+   `click → response RTT` chip is the number a takeover user feels.
+   (Auto-interact keeps this lane fed on its own.)
+3. **Press "simulate network drop."** Every arm's connection(s) close,
+   1.5 s of dead air passes (the engine keeps streaming into the gap),
+   then all arms reconnect at once. quicrtc re-dials **once** with
+   `{session, last_seen}` and the server replays what was missed —
+   **0 messages lost**. The glued arm re-opens **three** connections
+   and recovers only its SSE lane (that's the one lane where resume is
+   idiomatic to hand-roll). The single WS recovers nothing.
 
 Flags: `-profile clean|broadband|cafe|hotel`, or override with
 `-rtt`, `-mbps`, `-loss` (loss applies to the QUIC path only — a
 userspace TCP proxy can't drop packets — so it only ever handicaps
-quicrtc). `-fps` sets the burst capture rate; the screen idles at a
-third of it when the desktop is static, like a real capture pipeline.
+quicrtc). `-naive-frames` switches the single-WS arm from the
+steelman to the FIFO frame queue many products actually ship.
 
 ## Measured numbers (no browser needed)
 
-`-bench` runs a Go client on each transport through the same shaped
-link and prints the table — the browserless version of what the page
-shows, and where the numbers below come from
-(`go run ./examples/agent-desktop -bench 2m`):
+`-bench` runs Go clients on all three arms through the same shaped
+links, drives the action lane at 2 clicks/s, performs the same
+mid-run drop, and prints the table
+(`go run ./examples/agent-desktop -bench 60s`):
 
-| lane | café wifi (40 ms / 8 Mbps) | hotel wifi (80 ms / 6 Mbps) |
-|---|---|---|
-| reasoning tokens p99 | ws **378 ms** → quicrtc **164 ms** (~2.3×) | ws **1450 ms** → quicrtc **219 ms** (~6.6×) |
-| tool calls p99 | ws **490 ms** → quicrtc **128 ms** (~3.8×) | ws **1550 ms** → quicrtc **181 ms** (~8.6×) |
-| telemetry p99 | ws **895 ms** → quicrtc **166 ms** (~5.4×) | ws **1786 ms** → quicrtc **215 ms** (~8.3×) |
-| screen frames p50 | ws 163 ms ≈ quicrtc 186 ms | ws 621 ms ≈ quicrtc 1000 ms |
+**Café wifi (40 ms RTT / 8 Mbps), steady state p50 / p99 ms:**
 
-(Latency is one-way publish→receive; both clients share the
-publisher's clock. Your absolute numbers will vary with hardware;
-the *shape* — interactive lanes isolated, bulk lane even — is the
-reproducible part.)
+| lane | single WS | glued stack | quicrtc |
+|---|---|---|---|
+| action → ack RTT | 73 / 151 | 78 / 161 | **75 / 121** |
+| reasoning tokens | 56 / 137 | 57 / 139 | **51 / 96** |
+| telemetry | 57 / 134 | 54 / 140 | **51 / 93** |
+| screen frames | 176 / 229 | 173 / 229 | 178 / 234 |
 
-## Why the gap exists
+**The mid-run network drop (1.5 s dead air, all arms at once):**
 
-The WebSocket pane is not a strawman: it uses a lean 13-byte binary
-envelope (no JSON framing, no base64) and a bounded drop-oldest send
-queue. Its handicap is structural — one TCP stream is one FIFO
-queue:
+| | single WS | glued stack | quicrtc |
+|---|---|---|---|
+| connections to re-open | 1 | 3 | **1** |
+| reconnect → first data | 48 ms | 162 ms | 135 ms |
+| data lost in the gap | **46 tokens + telemetry** | telemetry only | **nothing** |
 
-- A ~70 KB screen frame accepted by the socket ahead of a 10-byte
-  token must finish transmitting before the token's first byte
-  leaves.
-- During screen bursts the queue grows, and *everything* in it —
-  tokens, tool calls, metrics — ages together.
-- Under packet loss, TCP's in-order delivery holds back every lane
-  behind the gap (this demo doesn't even exercise that; add `-loss`
-  and it handicaps only quicrtc).
+With `-naive-frames` (the frame handling many single-socket products
+actually ship), the single-WS column collapses to **1.3–2.5 s** on
+every lane while the other two arms are unchanged — worth seeing once
+to understand what the steelman ack-pacing is doing for the baseline.
 
-quicrtc gives each lane its own QUIC stream (or datagrams), so lanes
-share bandwidth but never a queue, and the per-session priority
-scheduler (`server.SchedulerOn`) drains token/tool-call writes ahead
-of queued bulk frames. The screen lane itself gets no miracle — both
-transports carry the same ~6 Mbps of PNG through the same bottleneck
-— but quicrtc's keyframe-aware drop policy sheds stale frames to
-protect freshness where the WebSocket must deliver every byte, late.
+On the hotel profile (80 ms / 6 Mbps) the shape is the same with the
+tails further apart (tokens 178 → 127, actions 202 → 168 at p99).
+Absolute numbers vary with hardware; the reproducible part is the
+shape: **interactive lanes isolated, bulk lane even, nothing lost on
+reconnect.**
+
+## How to read the result (the honest version)
+
+Against the **single-WS** arm the mechanism is structural: one TCP
+stream is one FIFO, so a token behind the in-flight 70 KB frame waits
+for it, and during loss TCP's in-order delivery holds every lane
+behind the gap. Steelman pacing shrinks the damage; it can't remove
+it.
+
+Against the **glued stack** the latency gap is smaller and honest:
+separate TCP connections don't share an app FIFO, so the remaining
+difference comes from per-lane QUIC streams sharing one congestion
+controller and packet-level interleaving at the bottleneck. Where
+quicrtc separates from the glued stack is everything around latency:
+
+- **one connection** to open, secure, monitor, and reconnect — vs
+  three reconnect dances and per-connection auth;
+- **replay for every lane** on resume, from the transport — the glued
+  arm's token replay took a hand-rolled ring buffer and `?from=`
+  protocol in this demo (~200 lines a real product must own), and
+  still covers one lane out of four;
+- **fire-and-forget telemetry** on datagrams — the glued arm's
+  telemetry is reliable-ordered whether it wants that or not;
+- the **latest-frame-wins screen protocol came free** (stream-per-GOP
+  reset + keyframe-aware drops) where both baselines needed the
+  ack-pacing implemented by hand.
 
 ## What's real vs. scripted
 
-Real: everything on the wire. PNG desktop frames the browser
-actually decodes (a painted window manager — terminal, editor, CI
-browser — with a real bitmap font), 30 tok/s token cadence, JSON
-tool calls, telemetry, both protocol stacks, and the link emulation
-(one-way delay + single-server serialization queue per direction,
-identical for both).
+Real: everything on the wire. All three protocol stacks (including
+the raw-WebTransport quicrtc client in `ui.html`, resume included),
+PNG desktop frames the browser actually decodes (painted window
+manager with a real bitmap font), 30 tok/s token cadence, the
+interactive click → ripple → ack loop, the link emulation (one-way
+delay + single-server serialization queue per direction, identical
+for every arm), and the drop/reconnect mechanics.
 
 Scripted: the agent's reasoning text and action sequence — no model
-is running. The demo page speaks the quicrtc wire format directly
-over raw WebTransport (see `ui.html`); the production path for
-browsers is the [TypeScript SDK](../../ts-sdk/).
+is running. The production path for browsers is the
+[TypeScript SDK](../../ts-sdk/), which wraps everything `ui.html`
+does by hand (including resume) behind `QuicRTCClient`.
+
+What this demo does NOT claim: real-WAN numbers (the link is emulated
+in-process; for the same comparison on real GCP VMs see
+[`testing/wan_bench`](../../testing/wan_bench/)), video-codec parity
+with WebRTC screen pipelines (frames are PNG, not H.264), or that
+UDP is never blocked (corporate networks that drop UDP need a TCP
+fallback path regardless of transport choice).
 
 ## Files
 
-- [`main.go`](./main.go) — servers (quicrtc, WebSocket, page), track
-  setup, wiring
+- [`main.go`](./main.go) — servers for all three arms + the page,
+  track setup, the receipt-paced quicrtc screen sink
 - [`engine.go`](./engine.go) — the agent loop; fans identical events
-  to both transports
+  to every arm; the click-ripple action path
 - [`script.go`](./script.go) — the scripted coding task
 - [`desktop.go`](./desktop.go) + [`font.go`](./font.go) — the desktop
-  painter (windows, terminal, editor, bitmap font)
-- [`baseline.go`](./baseline.go) — the single-WebSocket transport
-- [`shaper.go`](./shaper.go) — the emulated link (UDP + TCP, same
-  queue model)
-- [`bench.go`](./bench.go) — headless measurement mode
-- [`ui.html`](./ui.html) — the side-by-side page (raw WebTransport
-  client included)
+  painter (windows, terminal, editor, bitmap font, click ripples)
+- [`baseline.go`](./baseline.go) — shared baseline plumbing + the
+  single-WS arm (ack-paced frames, bounded FIFOs)
+- [`glued.go`](./glued.go) — the glued arm (frames WS + events WS +
+  SSE with ring-buffer replay)
+- [`shaper.go`](./shaper.go) — the emulated links (UDP + TCP, one
+  shared wire per arm)
+- [`bench.go`](./bench.go) — headless three-arm measurement with the
+  drop phase
+- [`ui.html`](./ui.html) — the three-pane page (raw WebTransport
+  client with resume, drop button, recovery readouts)
 
 ## Where to go next
 
@@ -122,5 +168,5 @@ browsers is the [TypeScript SDK](../../ts-sdk/).
   [`examples/cua-live`](../cua-live/)
 - The naive-vs-multistream dispatch benchmark with tunable handler
   latencies: [`examples/cua`](../cua/)
-- Real-WAN (two GCP VMs) validation of the same comparison:
+- Real-WAN (two GCP VMs) validation of the transport comparison:
   [`testing/wan_bench`](../../testing/wan_bench/)

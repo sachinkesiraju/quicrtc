@@ -32,16 +32,16 @@ A track's `Kind` picks its wire shape. Video bursts and the token stream sit on 
 
 ## See it
 
-One command runs the flagship demo — a cloud coding agent's desktop (screen, reasoning tokens, tool calls, telemetry) streamed to your browser over quicrtc and over a single WebSocket **side by side**, through the same emulated café-wifi link, with live per-lane latency:
+One command runs the flagship demo — a cloud coding agent's desktop (screen, reasoning tokens, tool calls, telemetry, and live click input) streamed to your browser over **three wires side by side**: quicrtc, a single WebSocket, and the "glued stack" real products ship (frames WS + tokens SSE + events WS) — each through its own identical emulated café-wifi link:
 
 ```bash
 go run ./examples/agent-desktop
 # open http://127.0.0.1:8420
 ```
 
-<p align="center"><img src="docs/assets/agent_desktop.png" alt="Side-by-side cloud agent desktops: single WebSocket vs quicrtc, with per-lane latency chips" width="820"></p>
+<p align="center"><img src="docs/assets/agent_desktop.png" alt="Three cloud agent desktops side by side: single WebSocket, glued stack, quicrtc — with per-lane latency chips and drop-recovery readouts" width="900"></p>
 
-The screen lane (~6 Mbps of desktop frames) stays roughly even — both transports carry the same bulk bytes through the same bottleneck. The agent's *interactive* lanes are where the architecture shows: reasoning tokens, tool calls, and telemetry stop queueing behind the screen share and arrive **3–10× faster at p99** ([details + headless bench mode](examples/agent-desktop/)).
+The baselines are deliberately steelmanned (binary envelopes, noVNC-style ack-paced frames, hand-rolled SSE token replay), and the screen lane stays even across all three by construction. What separates quicrtc: the interactive lanes — click→response RTT, tokens, telemetry — run **consistently lower at p99**; and when you press *simulate network drop*, quicrtc re-dials **once** and the transport replays everything missed (**0 messages lost**), while the glued arm re-opens three connections recovering one lane, and the single WS loses the gap outright ([numbers + methodology](examples/agent-desktop/)).
 
 ## Performance
 

@@ -161,7 +161,7 @@ document.getElementById('net').textContent = 'emulated link — ' + netDesc;
 document.getElementById('foot-net').textContent = netDesc;
 
 const td = new TextDecoder(), te = new TextEncoder();
-const WINDOW_MS = 20000;
+const WINDOW_MS = 30000;
 const OUTAGE_MS = 1500;
 
 function esc(s) {
@@ -345,13 +345,14 @@ function sendActionEverywhere(x, y) {
   for (const s of sides) if (s.sendAction) s.sendAction(seq, x, y);
 }
 
-// Auto-interact: a synthetic click every 2s keeps the RTT lane fed.
+// Auto-interact: a synthetic click every 1.5s keeps the RTT lane fed
+// (~20 samples per stats window; a human clicking works too).
 setInterval(() => {
   if (!document.getElementById('auto-interact').checked) return;
   const x = 40 + Math.floor(Math.random() * (cfg.width - 80));
   const y = 60 + Math.floor(Math.random() * (cfg.height - 140));
   sendActionEverywhere(x, y);
-}, 2000);
+}, 1500);
 
 // ── envelope helpers (both WS arms) ─────────────────────────────────
 const L_SCREEN = 1, L_TOKENS = 2, L_TOOLS = 3, L_TELE = 4, L_ACTION = 5, L_FRAMEACK = 6;
@@ -705,11 +706,26 @@ connectGlued(gluedSide);
 connectQuicrtc(qSide, false);
 
 // ── the drop button ─────────────────────────────────────────────────
+// The actual drop waits (up to 12s) for a moment when tokens are
+// actively streaming, so the gap deterministically contains data
+// whose fate differs per arm — otherwise the demo moment depends on
+// where the script's pauses fall.
 const dropBtn = document.getElementById('drop-btn');
 dropBtn.addEventListener('click', () => {
   dropBtn.disabled = true;
-  for (const s of sides) if (s.dropNow) s.dropNow();
-  setTimeout(() => { dropBtn.disabled = false; }, OUTAGE_MS + 3000);
+  dropBtn.textContent = 'waiting for token burst…';
+  const t0 = performance.now();
+  const poll = setInterval(() => {
+    const active = performance.now() - qSide.stats.tokens.lastArrival < 250;
+    if (!active && performance.now() - t0 < 12000) return;
+    clearInterval(poll);
+    dropBtn.textContent = 'dropped!';
+    for (const s of sides) if (s.dropNow) s.dropNow();
+    setTimeout(() => {
+      dropBtn.disabled = false;
+      dropBtn.textContent = 'simulate network drop';
+    }, OUTAGE_MS + 3000);
+  }, 100);
 });
 
 // ── render loop ─────────────────────────────────────────────────────

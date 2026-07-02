@@ -1,6 +1,6 @@
 // The agent engine: plays the scripted session and fans every event
-// out to BOTH transports at the same instant with the same payload
-// and the same publish timestamp. Neither side gets a head start —
+// out to EVERY transport arm at the same instant with the same
+// payload and the same publish timestamp. No arm gets a head start —
 // the only variable in the comparison is the wire.
 package main
 

@@ -121,7 +121,7 @@ func script() []step {
 	return []step{
 		{
 			title:     "set up the workspace",
-			reasoning: "Starting on the task: customers report invoice totals drifting by a few cents when a discount is applied. First I'll clone the repo into the workspace and run the full test suite to see the current state before touching anything.",
+			reasoning: "Starting on the task: customers report invoice totals drifting by a few cents when a percentage discount is applied, and finance flagged it because the drift compounds across thousands of invoices a day. First I'll clone the repo into the workspace and run the full test suite to see the current state before touching anything — if the bug is real there should already be a failing test, and if there isn't, writing one is my first job.",
 			call:      toolCall{Tool: "run_command", Cmd: "git clone git@github.com:acme/payments-service && go test ./..."},
 			mutations: []mutation{
 				{0, term("$ git clone git@github.com:acme/payments-service", cPrompt)},
@@ -138,7 +138,7 @@ func script() []step {
 		},
 		{
 			title:     "reproduce and localize the failure",
-			reasoning: "One failing test: TestInvoiceTotalWithDiscount expects 107989 cents but Total() returns 107987 — two cents short on a 15-item invoice. A small negative drift that grows with item count smells like per-item truncation. Let me run just that test with -v and then read the function.",
+			reasoning: "One failing test: TestInvoiceTotalWithDiscount expects 107989 cents but Total() returns 107987 — two cents short on a 15-item invoice. A small negative drift that grows with the number of line items is the signature of per-item truncation: each cast throws away up to a cent, and the losses only ever point one direction. Let me run just that test with -v to confirm the drift scales with item count, then read the function itself before deciding on the fix.",
 			call:      toolCall{Tool: "run_command", Cmd: "go test ./billing -run TestInvoiceTotalWithDiscount -v"},
 			mutations: []mutation{
 				{0, term("$ go test ./billing -run TestInvoiceTotalWithDiscount -v", cPrompt)},
@@ -150,7 +150,7 @@ func script() []step {
 		},
 		{
 			title:     "read the offending code",
-			reasoning: "Opening billing/invoice.go. There it is: the discount is applied per line item and each discounted price is cast straight to int64, which truncates toward zero. Fifteen truncations, up to a cent each. The invoice-level contract in the spec says: discount the subtotal, then round half-up once.",
+			reasoning: "Opening billing/invoice.go. There it is: the discount is applied per line item and each discounted price is cast straight to int64, which truncates toward zero. Fifteen line items means fifteen truncations, up to a cent each, always in the customer's favor or against them depending on sign — never balancing out. The invoice-level contract in the billing spec is explicit about this exact case: apply the discount to the subtotal, then round half-up exactly once. The per-item approach can never satisfy that, no matter how the rounding mode is tweaked.",
 			call:      toolCall{Tool: "open_file", Path: "billing/invoice.go"},
 			mutations: []mutation{
 				{0, func(s *scene) {
@@ -163,7 +163,7 @@ func script() []step {
 		},
 		{
 			title:     "patch the rounding bug",
-			reasoning: "Rewriting Total(): accumulate the exact integer subtotal first, apply the discount once at invoice level, and round half-up with math.Round instead of truncating. That matches the billing spec and kills the accumulation drift for any item count.",
+			reasoning: "Rewriting Total(): accumulate the exact integer subtotal first — unit cents times quantity stays in int64, no floats anywhere near the loop — then apply the discount once at invoice level and round half-up with math.Round instead of truncating. That matches the billing spec, kills the accumulation drift for any item count, and as a bonus the function gets simpler: one conversion to float64 at the very end instead of one per line item.",
 			call: toolCall{
 				Tool: "edit_file", Path: "billing/invoice.go",
 				Diff: "-\t\tdiscounted := price * (1 - inv.DiscountPct/100)\n-\t\ttotal += int64(discounted)\n+\tdiscounted := float64(subtotal) * (1 - inv.DiscountPct/100)\n+\treturn int64(math.Round(discounted))",
@@ -179,7 +179,7 @@ func script() []step {
 		},
 		{
 			title:     "verify the fix",
-			reasoning: "Re-running the whole suite, not just the failing test — rounding changes love to break neighboring golden values. Everything is green, including the property test that sweeps invoices from 1 to 500 items. The drift is gone at every size.",
+			reasoning: "Re-running the whole suite, not just the failing test — rounding changes love to break neighboring golden values, and the ledger package consumes Total() for reconciliation so it gets a close look. Everything is green, including the property test that sweeps invoices from 1 to 500 items with randomized prices and discount rates. The drift is gone at every size, and the reconciliation goldens didn't move, which confirms the old behavior was wrong only in the discounted path.",
 			call:      toolCall{Tool: "run_command", Cmd: "go test ./..."},
 			mutations: []mutation{
 				{0, term("$ go test ./...", cPrompt)},
@@ -191,7 +191,7 @@ func script() []step {
 		},
 		{
 			title:     "commit and open the PR",
-			reasoning: "Committing the fix with a message that explains the invoice-level rounding contract, pushing the branch, and opening a pull request. I'll watch CI run the same suite on a clean runner before handing this back.",
+			reasoning: "Committing the fix with a message that explains the invoice-level rounding contract rather than just describing the diff — the next person to touch this function should learn the spec from the history. Pushing the branch and opening a pull request against main with the failing-then-fixed test called out in the description. I'll watch CI run the same suite on a clean runner before handing this back for review.",
 			call:      toolCall{Tool: "git_commit", Cmd: "git checkout -b fix/invoice-rounding && git commit -am 'billing: apply discount at invoice level, round half-up' && gh pr create"},
 			mutations: []mutation{
 				{0, term("$ git checkout -b fix/invoice-rounding", cPrompt)},
@@ -209,7 +209,7 @@ func script() []step {
 		},
 		{
 			title:     "watch CI go green",
-			reasoning: "CI is running go-test, go-vet, and gosec on the PR. All three checks passed on the clean runner. Task complete: the rounding drift is fixed, covered by the existing property test, and the PR is ready for human review.",
+			reasoning: "CI is running go-test, go-vet, and gosec on the PR — the same suite that failed at the start of the session, now on a clean runner with no local state to flatter the result. All three checks passed. Task complete: the rounding drift is fixed at the invoice level where the spec says it belongs, the property test covers every invoice size that mattered, and the PR is ready for human review with the reasoning documented in the commit message.",
 			call:      toolCall{Tool: "wait_for_ci", Note: "pull #2481: go-test, go-vet, gosec"},
 			mutations: []mutation{
 				{2500 * time.Millisecond, func(s *scene) {

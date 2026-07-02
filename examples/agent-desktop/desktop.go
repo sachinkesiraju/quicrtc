@@ -79,6 +79,16 @@ type scene struct {
 	ciPassing bool
 
 	prURL string
+
+	// clicks are transient viewer-click ripples (interactive action
+	// lane). Pruned by the painter as they age out.
+	clicks []clickMark
+}
+
+// clickMark is one viewer click, aged by painter tick.
+type clickMark struct {
+	x, y int
+	born uint32
 }
 
 const termMaxLines = 24
@@ -202,8 +212,76 @@ func (p *desktopPainter) paint(s *scene) {
 		}
 	}
 
+	p.paintClicks(s)
 	p.paintStatusBar(s)
 }
+
+// clickTTL is how many painter ticks a click ripple stays visible.
+const clickTTL = 14
+
+// paintClicks draws expanding rings at recent viewer-click positions
+// and prunes expired ones. The visible ripple is the "screen response"
+// to the interactive action lane.
+func (p *desktopPainter) paintClicks(s *scene) {
+	img := p.img
+	keep := s.clicks[:0]
+	for _, c := range s.clicks {
+		age := p.tick - c.born
+		if age > clickTTL {
+			continue
+		}
+		keep = append(keep, c)
+		col := color.NRGBA{R: 120, G: 190, B: 255, A: 255}
+		r1 := 4 + int(age)*2
+		for _, r := range []int{r1, r1 + 1} {
+			for a := 0; a < 360; a += 4 {
+				dx := r * cosDeg(a) / 100
+				dy := r * sinDeg(a) / 100
+				setPx(img, c.x+dx, c.y+dy, col)
+			}
+		}
+		// Center dot.
+		fillRect(img, c.x-2, c.y-2, c.x+2, c.y+2, col)
+	}
+	s.clicks = keep
+}
+
+func setPx(img *image.NRGBA, x, y int, c color.NRGBA) {
+	b := img.Bounds()
+	if x < 0 || y < 0 || x >= b.Dx() || y >= b.Dy() {
+		return
+	}
+	off := img.PixOffset(x, y)
+	img.Pix[off+0] = c.R
+	img.Pix[off+1] = c.G
+	img.Pix[off+2] = c.B
+	img.Pix[off+3] = c.A
+}
+
+// cosDeg/sinDeg return cos/sin scaled by 100 — a coarse table is
+// plenty for decorative rings (same approach as cua-live's painter).
+func cosDeg(deg int) int { return trigTable[((deg%360)+360)%360][0] }
+func sinDeg(deg int) int { return trigTable[((deg%360)+360)%360][1] }
+
+var trigTable = func() [360][2]int {
+	var t [360][2]int
+	for d := 0; d < 360; d++ {
+		q := d % 90
+		cosQ := 100 - (q*q)/81
+		sinQ := 100 - ((90-q)*(90-q))/81
+		switch d / 90 {
+		case 0:
+			t[d] = [2]int{cosQ, sinQ}
+		case 1:
+			t[d] = [2]int{-sinQ, cosQ}
+		case 2:
+			t[d] = [2]int{-cosQ, -sinQ}
+		default:
+			t[d] = [2]int{sinQ, -cosQ}
+		}
+	}
+	return t
+}()
 
 func (p *desktopPainter) paintWallpaper() {
 	img := p.img

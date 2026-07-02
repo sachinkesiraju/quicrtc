@@ -76,6 +76,21 @@ func (e *engine) addSink(s sink) {
 	e.sinks = append(e.sinks, s)
 }
 
+// userAction registers a viewer click at desktop coordinates: the
+// painter draws a ripple there for the next second, and the burst
+// window opens so the response is visible promptly on the screen
+// lane. Called from every transport's action path.
+func (e *engine) userAction(x, y int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.scene.clicks = append(e.scene.clicks, clickMark{x: x, y: y, born: e.painter.tick})
+	if len(e.scene.clicks) > 8 {
+		e.scene.clicks = e.scene.clicks[len(e.scene.clicks)-8:]
+	}
+	e.lastMutation = time.Now()
+	e.st.Inc("user_actions", 1)
+}
+
 func (e *engine) fanout(ev event) {
 	e.mu.Lock()
 	sinks := e.sinks
@@ -112,9 +127,15 @@ const burstWindow = 1500 * time.Millisecond
 // edits, CI updates), ~1/3 rate when the scene is static. The bursts
 // are what periodically saturate the emulated link; the idle stretches
 // let it drain, so the comparison reaches a steady state instead of
-// unbounded queue growth. Keyframe cadence is every 10 frames (PNG
-// frames are all self-contained; the flag drives quicrtc's
-// stream-per-GOP rotation).
+// unbounded queue growth.
+//
+// Every frame is marked keyframe because every PNG IS independently
+// decodable — and on quicrtc that flag is load-bearing: stream-per-GOP
+// opens a fresh QUIC stream per keyframe and RESETS the previous
+// stream, so when the link falls behind, the half-sent stale frame is
+// abandoned at the QUIC layer the instant a newer one exists. That is
+// the transport-native equivalent of the ack-paced latest-only frame
+// sending the steelmanned WS baselines implement by hand.
 func (e *engine) runScreen(ctx context.Context) {
 	idleFPS := e.fps / 3
 	if idleFPS < 2 {
@@ -144,7 +165,7 @@ func (e *engine) runScreen(ctx context.Context) {
 		e.seqScreen++
 		e.fanout(event{
 			lane: laneScreen, seq: seq, ptsMicro: nowMicro(),
-			keyframe: seq%10 == 0, payload: png,
+			keyframe: true, payload: png,
 		})
 		e.st.Inc("screen_au", 1)
 		e.st.Inc("screen_bytes", int64(len(png)))

@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>quicrtc · Agent Session — watch &amp; steer your agent</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <header class="bar">
+    <strong>quicrtc &middot; Agent Session</strong>
+    <span class="muted small">
+      The same AI agent, streamed two ways. Both show a live desktop, an
+      activity feed, and a <b>Take&nbsp;control</b> click. Watch which one
+      stays responsive when the desktop gets busy.
+    </span>
+    <span class="spacer"></span>
+    <button id="stop" class="ghost" hidden>disconnect</button>
+  </header>
+
+  <section id="connect-card" class="card connect">
+    <h2>connect the two sessions</h2>
+    <p class="muted small">
+      Start both servers with <code>ts-sdk/examples/agent-session/run.sh</code>
+      (it prints two share URLs), then paste each below.
+      Left = <code>-mode=naive</code> (standard). Right = <code>-mode=multistream</code> (quicrtc).
+    </p>
+    <form id="connect-form">
+      <label class="field">
+        <span class="field-label">Left &mdash; <b>Standard transport</b> (naive)</span>
+        <input id="url-a" type="url" autocomplete="off"
+          placeholder="https://127.0.0.1:NNNN/wt#slug=...&amp;hash=...  (mode=naive)" />
+      </label>
+      <label class="field">
+        <span class="field-label">Right &mdash; <b>quicrtc</b> (multistream)</span>
+        <input id="url-b" type="url" autocomplete="off"
+          placeholder="https://127.0.0.1:NNNN/wt#slug=...&amp;hash=...  (mode=multistream)" />
+      </label>
+      <div class="controls">
+        <label class="inline">
+          control clicks/sec
+          <input id="rate" type="number" min="1" max="60" value="12" />
+        </label>
+        <button type="submit">connect &amp; start</button>
+      </div>
+    </form>
+    <p id="connect-error" class="error" hidden></p>
+  </section>
+
+  <main id="stage" class="stage" hidden>
+    <div id="scoreboard" class="scoreboard" data-state="even" hidden>
+      <div class="ratio-big"><span id="ratio">—</span></div>
+      <div id="ratio-sub" class="ratio-sub">measuring…</div>
+    </div>
+    <div id="sessions" class="sessions"></div>
+    <p class="muted small center hint">
+      Tip: click either desktop to "take control" — a latency badge lands where you click.
+    </p>
+  </main>
+
+  <template id="session-template">
+    <section class="session" data-variant="">
+      <header class="session-head">
+        <div class="session-id">
+          <span class="dot"></span>
+          <span class="session-title"></span>
+          <span class="session-sub muted small"></span>
+        </div>
+        <span class="pill" data-state="disconnected">disconnected</span>
+      </header>
+
+      <div class="body">
+        <div class="desktop-wrap">
+          <div class="desktop-label">agent desktop <span class="desktop-fps mono"></span></div>
+          <div class="desktop-frame">
+            <canvas class="desktop-canvas" width="480" height="320"></canvas>
+            <div class="desktop-overlay" data-frozen="false">
+              <span class="frozen-tag">frozen</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="side">
+          <div class="gauge" data-level="good">
+            <div class="gauge-label">take-control latency</div>
+            <div class="gauge-readout">
+              <span class="gauge-num">—</span><span class="gauge-unit">ms</span>
+            </div>
+            <div class="gauge-verdict">waiting…</div>
+          </div>
+          <div class="feed-wrap">
+            <div class="feed-title">agent activity</div>
+            <ul class="feed"></ul>
+          </div>
+        </div>
+      </div>
+    </section>
+  </template>
+
+  <script type="module" src="./agent-session.js"></script>
+</body>
+</html>

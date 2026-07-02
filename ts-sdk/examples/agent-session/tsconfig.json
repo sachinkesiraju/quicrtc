@@ -1,0 +1,15 @@
+{
+  "//": "Standalone type-check + emit for the agent-session example. Kept out of the SDK build (the root tsconfig excludes examples). Imports the SDK from ../../dist via its .d.ts files. Run: cd ts-sdk/examples/agent-session && npx tsc",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "moduleResolution": "node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "sourceMap": false
+  },
+  "include": ["agent-session.ts"]
+}

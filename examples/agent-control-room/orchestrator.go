@@ -48,6 +48,10 @@ type orchestrator struct {
 	painter *desktopPainter
 	plans   []workerPlan
 
+	// Real-agent mode (optional).
+	brains    map[workerID]WorkerBrain
+	workspace *workspace
+
 	mu           sync.Mutex
 	scene        scene
 	lastMutation time.Time
@@ -57,6 +61,9 @@ type orchestrator struct {
 	seqTool   uint32
 
 	steerCh chan steerMsg
+
+	steerInjectMu sync.Mutex
+	steerInject   map[workerID][]string
 
 	// per-worker cancel; steer cancels without stopping peers.
 	workerCancel map[workerID]context.CancelFunc
@@ -88,10 +95,36 @@ func newOrchestrator(screen, reasoning, tool *server.Publisher, st *status.Statu
 		painter:      newDesktopPainter(),
 		plans:        workerPlans(),
 		steerCh:      make(chan steerMsg, 32),
+		steerInject:  make(map[workerID][]string),
 		workerCancel: make(map[workerID]context.CancelFunc),
 	}
 	resetScene(&o.scene)
 	return o
+}
+
+func newOrchestratorLLM(screen, reasoning, tool *server.Publisher, st *status.Status, cfg llmConfig, wsDir string) (*orchestrator, error) {
+	ws, err := newWorkspace(wsDir)
+	if err != nil {
+		return nil, err
+	}
+	brains, err := newWorkerBrains(cfg)
+	if err != nil {
+		ws.Close()
+		return nil, err
+	}
+	o := newOrchestrator(screen, reasoning, tool, st)
+	o.brains = brains
+	o.workspace = ws
+	return o, nil
+}
+
+func (o *orchestrator) closeLLM() {
+	for _, b := range o.brains {
+		_ = b.Close()
+	}
+	if o.workspace != nil {
+		_ = o.workspace.Close()
+	}
 }
 
 func (o *orchestrator) deliverSteer(msg steerMsg) {
@@ -140,11 +173,21 @@ func (o *orchestrator) applySteer(msg steerMsg) {
 		o.cancelWorkers(msg.Worker)
 		o.cancelCount.Add(1)
 	case "inject":
+		text := msg.Text
+		o.steerInjectMu.Lock()
+		if msg.Worker == "" {
+			for _, id := range []workerID{workerTests, workerCode, workerShip} {
+				o.steerInject[id] = append(o.steerInject[id], text)
+			}
+		} else {
+			o.steerInject[workerID(msg.Worker)] = append(o.steerInject[workerID(msg.Worker)], text)
+		}
+		o.steerInjectMu.Unlock()
 		prefix := "[you] "
 		if msg.Worker != "" {
 			prefix = fmt.Sprintf("[%s steer] ", msg.Worker)
 		}
-		o.streamReasoning(context.Background(), prefix+msg.Text)
+		o.streamReasoning(context.Background(), prefix+text)
 	}
 }
 
@@ -236,6 +279,10 @@ func (o *orchestrator) runParallelCycle(ctx context.Context) {
 }
 
 func (o *orchestrator) runWorker(ctx context.Context, plan workerPlan, from int) {
+	if o.brains != nil {
+		o.runLLMWorker(ctx, plan.id)
+		return
+	}
 	for i := from; i < len(plan.steps); i++ {
 		if o.benchSingleStep && i > from {
 			break
@@ -294,6 +341,127 @@ func (o *orchestrator) runWorker(ctx context.Context, plan workerPlan, from int)
 		delete(o.workerCancel, plan.id)
 		o.mu.Unlock()
 		o.st.Inc("worker_steps", 1)
+	}
+}
+
+func (o *orchestrator) drainSteerInject(id workerID) []string {
+	o.steerInjectMu.Lock()
+	defer o.steerInjectMu.Unlock()
+	msgs := o.steerInject[id]
+	delete(o.steerInject, id)
+	return msgs
+}
+
+func (o *orchestrator) sceneSnapshotLocked() sceneSnapshot {
+	return sceneSnapshot{
+		StepTitle:  o.scene.stepTitle,
+		TermLines:  len(o.scene.term),
+		EditorFile: o.scene.editorFile,
+		CIVisible:  o.scene.ciVisible,
+		CIPassing:  o.scene.ciPassing,
+		PRURL:      o.scene.prURL,
+	}
+}
+
+func (o *orchestrator) runLLMWorker(ctx context.Context, id workerID) {
+	brain := o.brains[id]
+	if brain == nil {
+		return
+	}
+	stepIdx := 0
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+		wctx, cancel := context.WithCancel(ctx)
+		o.mu.Lock()
+		o.workerCancel[id] = cancel
+		o.mu.Unlock()
+
+		o.mu.Lock()
+		snap := o.sceneSnapshotLocked()
+		o.mu.Unlock()
+
+		steer := o.drainSteerInject(id)
+		turn, err := brain.NextStep(wctx, snap, steer)
+		if err != nil {
+			if wctx.Err() != nil {
+				return
+			}
+			o.streamReasoning(wctx, fmt.Sprintf("[%s] error: %v", id, err))
+			return
+		}
+
+		o.mu.Lock()
+		o.scene.stepTitle = fmt.Sprintf("[%s] %s", id, turn.Call.Tool)
+		if turn.Title != "" {
+			o.scene.stepTitle = turn.Title
+		}
+		o.mu.Unlock()
+
+		o.saveCheckpoint(id, stepIdx)
+
+		if !o.benchSkipReasoning && turn.Reasoning != "" {
+			o.streamReasoning(wctx, fmt.Sprintf("[%s] %s", id, turn.Reasoning))
+			if wctx.Err() != nil {
+				o.publishTool(wctx, id, turn.Call, "cancelled")
+				return
+			}
+		}
+
+		if turn.Call.Tool == "" {
+			if turn.Done {
+				break
+			}
+			stepIdx++
+			o.mu.Lock()
+			delete(o.workerCancel, id)
+			o.mu.Unlock()
+			continue
+		}
+
+		o.publishTool(wctx, id, turn.Call, "running")
+		outcome, execErr := executeTool(wctx, o.workspace, turn.Call)
+		if execErr != nil {
+			outcome.output = execErr.Error()
+		}
+		if br, ok := brain.(brainWithResult); ok && turn.Call.Tool != "finish_task" {
+			br.RecordToolResult(outcome.output)
+		}
+		if wctx.Err() != nil {
+			o.publishTool(context.Background(), id, turn.Call, "cancelled")
+			o.mu.Lock()
+			delete(o.workerCancel, id)
+			o.mu.Unlock()
+			return
+		}
+		o.publishTool(wctx, id, turn.Call, "done")
+
+		if !o.benchSkipMutations {
+			for _, m := range outcome.mutations {
+				select {
+				case <-wctx.Done():
+					o.mu.Lock()
+					delete(o.workerCancel, id)
+					o.mu.Unlock()
+					return
+				case <-time.After(m.after):
+				}
+				o.mu.Lock()
+				m.apply(&o.scene)
+				o.lastMutation = time.Now()
+				o.mu.Unlock()
+			}
+		}
+		o.mu.Lock()
+		delete(o.workerCancel, id)
+		o.mu.Unlock()
+		o.st.Inc("worker_steps", 1)
+		stepIdx++
+
+		if turn.Done || turn.Call.Tool == "finish_task" {
+			break
+		}
 	}
 }
 

@@ -25,6 +25,26 @@ With recording (enables fork-from-recording API):
 go run ./examples/agent-control-room -record /tmp/session.qrtc
 ```
 
+### Real agents (Anthropic)
+
+Three parallel specialists call Claude with real tool execution in a shared Go workspace (`go test`, `edit_file`, `git commit`):
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+go run ./examples/agent-control-room -llm
+# optional: -model claude-sonnet-4-20250514 -llm-turns 8 -workspace /tmp/ws
+```
+
+| Worker | Tools | Role |
+|--------|-------|------|
+| `tests` | run_command, finish_task | Reproduce failing test |
+| `code` | open_file, edit_file, run_command, finish_task | Patch `billing/invoice.go` |
+| `ship` | run_command, git_commit, finish_task | Commit + PR |
+
+Steer inject is fed back into each worker's next API turn. Cancel aborts in-flight API calls via context.
+
+Without `-llm`, workers use the scripted session (CI-safe, no API key).
+
 ## Validate the thesis (CI)
 
 ```bash

@@ -19,9 +19,13 @@ import (
 
 // harnessOptions configures a control-room instance for tests or demos.
 type harnessOptions struct {
-	HTTPAddr   string // default 127.0.0.1:0
-	FPS        int
+	HTTPAddr  string // default 127.0.0.1:0
+	FPS       int
 	RecordPath string
+	LLM       bool
+	LLMModel  string
+	LLMTurns  int
+	Workspace string // optional persistent workspace dir for -llm
 }
 
 // controlRoomHarness is a running agent-control-room (quicrtc + HTTP UI).
@@ -82,7 +86,18 @@ func startControlRoomHarness(opts harnessOptions) (*controlRoomHarness, error) {
 	reasoningPub := srv.AddTrackSpec(server.TrackSpec{Name: trackReasoning, Kind: track.KindTokens})
 	toolPub := srv.AddTrackSpec(server.TrackSpec{Name: trackToolCalls, Kind: track.KindToolCalls})
 
-	orch = newOrchestrator(screenPub, reasoningPub, toolPub, st)
+	if opts.LLM {
+		orch, err = newOrchestratorLLM(screenPub, reasoningPub, toolPub, st, llmConfig{
+			Model:    opts.LLMModel,
+			MaxTurns: opts.LLMTurns,
+		}, opts.Workspace)
+		if err != nil {
+			cancel()
+			return nil, err
+		}
+	} else {
+		orch = newOrchestrator(screenPub, reasoningPub, toolPub, st)
+	}
 
 	if opts.RecordPath != "" {
 		rec, err = record.NewFileRecorder(opts.RecordPath)
@@ -216,6 +231,9 @@ func (h *controlRoomHarness) Orchestrator() *orchestrator { return h.orch }
 
 func (h *controlRoomHarness) Close() {
 	h.cancel()
+	if h.orch != nil {
+		h.orch.closeLLM()
+	}
 	if h.detachRec != nil {
 		h.detachRec()
 	}

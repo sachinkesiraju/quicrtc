@@ -20,8 +20,22 @@ go run ./examples/agent-desktop -bench 60s   # browserless comparison table
 ```
 
 See [agent-desktop/README.md](agent-desktop/README.md) for the
-measured numbers and the honest-comparison methodology. The examples
-below then build the same machinery up piece by piece.
+measured numbers and the honest-comparison methodology.
+
+**agent-control-room** — the 10× product thesis on quicrtc: a
+**parallel, steerable, forkable** agent session (three sub-agents,
+cancel/inject on a steer lane, checkpoint fork from `.qrtc`). Validates
+with `-thesis-bench`:
+
+```bash
+go run ./examples/agent-control-room              # open http://127.0.0.1:8430
+go run ./examples/agent-control-room -thesis-bench
+go test ./examples/agent-control-room/ -v
+```
+
+See [agent-control-room/README.md](agent-control-room/README.md).
+
+The examples below then build the same machinery up piece by piece.
 
 ## Examples (reading order)
 

@@ -69,9 +69,10 @@ type orchestrator struct {
 	toolDelayOverride map[workerID]time.Duration
 	parallelMode      bool
 
-	cancelCount   atomic.Uint32
-	lastSteerUs   atomic.Uint64
-	lastSteerKind atomic.Value // string
+	cancelCount    atomic.Uint32
+	toolWorkActive atomic.Int32
+	lastSteerUs    atomic.Uint64
+	lastSteerKind  atomic.Value // string
 
 	checkpointMu sync.RWMutex
 	lastCP       checkpoint
@@ -306,6 +307,8 @@ func (o *orchestrator) simulateToolWork(ctx context.Context, id workerID) error 
 	if d <= 0 {
 		return nil
 	}
+	o.toolWorkActive.Add(1)
+	defer o.toolWorkActive.Add(-1)
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {

@@ -17,7 +17,7 @@ func TestParallelVsSerialThesis(t *testing.T) {
 }
 
 func TestSteerCancelThesis(t *testing.T) {
-	ms, err := measureSteerCancelLatency()
+	ms, err := measureSteerCancelUnderLoad()
 	if err != nil {
 		t.Fatal(err)
 	}

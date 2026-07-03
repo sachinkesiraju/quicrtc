@@ -44,6 +44,8 @@ func chromeOpts() []chromedp.ExecAllocatorOption {
 		opts = append(opts, chromedp.ExecPath(path))
 	} else if _, err := os.Stat("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"); err == nil {
 		opts = append(opts, chromedp.ExecPath("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"))
+	} else if _, err := os.Stat("/usr/local/bin/google-chrome"); err == nil {
+		opts = append(opts, chromedp.ExecPath("/usr/local/bin/google-chrome"))
 	}
 	return opts
 }

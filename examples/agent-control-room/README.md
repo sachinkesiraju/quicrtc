@@ -30,15 +30,21 @@ go run ./examples/agent-control-room -record /tmp/session.qrtc
 ```bash
 go run ./examples/agent-control-room -thesis-bench
 go test ./examples/agent-control-room/ -count=1 -v
+go test -tags browser ./examples/agent-control-room/ -run TestBrowser -count=1 -v
+go test ./testing/benchmarks/network/ -run TestControlRoom -count=1 -v
 ```
 
 **Pass criteria:**
 
-| Experiment | Target |
-|---|---|
-| E1 parallel vs serial (3×250ms tools) | ≥2.5× wall-clock speedup |
-| E2 steer cancel (2s tool, cancel at 50ms) | ≤150ms to stop |
-| E3 fork from recording checkpoint | ≤500ms restore |
+| Experiment | Target | Test |
+|---|---|---|
+| E1 parallel vs serial (3×250ms tools) | ≥2.5× wall-clock speedup | `TestParallelVsSerialThesis`, `TestFullScriptParallelSpeedup` |
+| E2 steer cancel during active tool work | ≤150ms to stop | `TestSteerCancelUnderLoadThesis`, `TestWebTransportSteerCancel` |
+| E3 fork from recording checkpoint | ≤500ms restore | `TestForkRestoreThesis`, `TestForkFromRecordingHTTP`, `TestRecordingSeekSnapshot` |
+| HTTP fork API | checkpoint round-trip | `TestHTTPCheckpointAndFork` |
+| WebTransport screen recv | first frame | `TestWebTransportRecvScreen` |
+| Shaped network (40ms one-way) | screen through proxy | `TestControlRoomWebTransportUnderShapedNetwork` |
+| Browser e2e | connect + fork UI | `TestBrowserConnectAndFork` (`-tags browser`) |
 
 ## UI
 

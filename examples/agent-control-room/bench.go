@@ -30,11 +30,11 @@ func runThesisBench() error {
 	fmt.Println("   E1 PASS")
 	fmt.Println()
 
-	cancelMs, err := measureSteerCancelLatency()
+	cancelMs, err := measureSteerCancelUnderLoad()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("E2 steer cancel (2s tool, cancel at 50ms)\n")
+	fmt.Printf("E2 steer cancel (2s tool, cancel during active work)\n")
 	fmt.Printf("   cancel latency: %dms (target ≤150ms)\n", cancelMs)
 	if cancelMs > 150 {
 		return fmt.Errorf("E2 FAIL: cancel latency %dms > 150ms", cancelMs)
@@ -112,6 +112,16 @@ func measureParallelVsSerial() (parResult, error) {
 }
 
 func measureSteerCancelLatency() (int64, error) {
+	return measureSteerCancelLatencyWithWait(true)
+}
+
+// measureSteerCancelUnderLoad waits until workers are inside simulateToolWork
+// before cancelling, so E2 validates steer during active tool execution.
+func measureSteerCancelUnderLoad() (int64, error) {
+	return measureSteerCancelLatencyWithWait(true)
+}
+
+func measureSteerCancelLatencyWithWait(waitForToolWork bool) (int64, error) {
 	o := newBenchOrchestrator(2 * time.Second)
 	o.parallelMode = true
 	o.benchSingleStep = true
@@ -126,7 +136,21 @@ func measureSteerCancelLatency() (int64, error) {
 		close(done)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	if waitForToolWork {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if o.toolWorkActive.Load() > 0 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if o.toolWorkActive.Load() == 0 {
+			return 0, fmt.Errorf("workers never entered tool work before cancel")
+		}
+	} else {
+		time.Sleep(50 * time.Millisecond)
+	}
+
 	t0 := time.Now()
 	o.applySteer(steerMsg{Type: "cancel", TsUs: uint64(time.Now().UnixMicro())})
 

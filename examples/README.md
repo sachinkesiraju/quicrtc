@@ -3,6 +3,40 @@
 End-to-end examples for the Go server + client APIs. Each builds on the
 previous; read in order.
 
+## Start here: the flagship demo
+
+**agent-desktop** — a cloud coding agent's
+desktop streamed to your browser over three wires *side by side* —
+quicrtc, a single WebSocket, and the multi-connection glued stack
+(frames WS + tokens SSE + events WS) — each through its own identical
+emulated network, with live per-lane latency, an interactive
+click→response lane, and a network-drop button that shows quicrtc's
+single-re-dial resume-with-replay against the baselines' reconnect
+scramble. One command, zero setup:
+
+```bash
+go run ./examples/agent-desktop          # open http://127.0.0.1:8420
+go run ./examples/agent-desktop -bench 60s   # browserless comparison table
+```
+
+See [agent-desktop/README.md](agent-desktop/README.md) for the
+measured numbers and the honest-comparison methodology.
+
+**agent-control-room** — the 10× product thesis on quicrtc: a
+**parallel, steerable, forkable** agent session (three sub-agents,
+cancel/inject on a steer lane, checkpoint fork from `.qrtc`). Validates
+with `-thesis-bench`:
+
+```bash
+go run ./examples/agent-control-room              # open http://127.0.0.1:8430
+go run ./examples/agent-control-room -thesis-bench
+go test ./examples/agent-control-room/ -v
+```
+
+See [agent-control-room/README.md](agent-control-room/README.md).
+
+The examples below then build the same machinery up piece by piece.
+
 ## Examples (reading order)
 
 1. **publisher** + **subscriber** —
@@ -52,6 +86,7 @@ headline above its boxed summary on Ctrl-C.
 
 | Example       | Real on the wire                                       | Mocked                                            |
 |---------------|--------------------------------------------------------|---------------------------------------------------|
+| agent-desktop | three full protocol stacks + emulated links, real PNG desktop, interactive input, drop/resume, measured per-lane latency | the agent's reasoning + action script (no model)  |
 | publisher     | QUIC + WT, one track, synthetic AUs                    | "synthetic" codec (random bytes), clearly labeled |
 | subscriber    | reads what publisher sent                              | —                                                 |
 | agent_pubsub  | 4 channels, per-Kind dispatch, real PNG screen         | agent reasoning sentences + tool-call list        |

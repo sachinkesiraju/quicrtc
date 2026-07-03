@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>cloud agent desktop — one agent, three wires</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0b0e14;
+    --panel: #11151d;
+    --panel2: #161b25;
+    --border: #232a38;
+    --text: #c9d1d9;
+    --dim: #7c8794;
+    --accent: #5a96e6;
+    --green: #57c87a;
+    --yellow: #e5c05a;
+    --red: #eb645c;
+    --purple: #b284ea;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 13.5px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 12px 20px 8px;
+  }
+  header h1 { font-size: 16px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header .sub { color: var(--dim); font-size: 12.5px; }
+  header .right { margin-left: auto; display: flex; gap: 10px; align-items: center; }
+  #net {
+    font-family: var(--mono); font-size: 11.5px; color: var(--dim);
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 4px 10px; border-radius: 6px;
+  }
+  #drop-btn {
+    font: 600 12.5px system-ui; color: #fff; background: #7a2f2b;
+    border: 1px solid #a03e38; border-radius: 6px; padding: 5px 14px; cursor: pointer;
+  }
+  #drop-btn:hover { background: #8f3833; }
+  #drop-btn:disabled { opacity: .5; cursor: default; }
+  label.auto { color: var(--dim); font-size: 12px; user-select: none; }
+  #summary {
+    display: flex; gap: 10px; flex-wrap: wrap; padding: 4px 20px 10px;
+  }
+  .headline {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 7px 12px; min-width: 200px; flex: 1;
+  }
+  .headline .k { color: var(--dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: .6px; }
+  .headline .v { font-family: var(--mono); font-size: 18px; font-weight: 650; margin-top: 1px; }
+  .headline .d { color: var(--dim); font-size: 11px; font-family: var(--mono); }
+  .headline .v.good { color: var(--green); }
+  main {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; padding: 0 20px 20px;
+  }
+  @media (max-width: 1400px) { main { grid-template-columns: 1fr; } }
+  .pane {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  .pane > .bar {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--panel2);
+  }
+  .pane .title { font-weight: 650; font-size: 12.5px; white-space: nowrap; }
+  .pane .proto { color: var(--dim); font-size: 10.5px; }
+  .pill {
+    margin-left: auto; font-size: 10.5px; font-family: var(--mono);
+    padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--dim);
+    white-space: nowrap;
+  }
+  .pill[data-s="connected"] { color: var(--green); border-color: #2c4a37; }
+  .pill[data-s="error"], .pill[data-s="dropped"] { color: var(--red); border-color: #55302d; }
+  .screenwrap { position: relative; background: #05070b; }
+  canvas.screen { display: block; width: 100%; height: auto; cursor: crosshair; }
+  .agebadge {
+    position: absolute; top: 8px; right: 8px; font-family: var(--mono); font-size: 11px;
+    background: rgba(5, 8, 12, .78); border: 1px solid var(--border);
+    padding: 2px 8px; border-radius: 6px; color: var(--dim);
+  }
+  .agebadge.warn { color: var(--yellow); border-color: #4d4224; }
+  .agebadge.frozen { color: var(--red); border-color: #55302d; font-weight: 700; }
+  .clickhint {
+    position: absolute; left: 8px; bottom: 8px; font-size: 10.5px; color: var(--dim);
+    background: rgba(5, 8, 12, .7); padding: 2px 8px; border-radius: 6px;
+  }
+  .lanes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); }
+  .lane { background: var(--panel); padding: 6px 8px 7px; min-width: 0; }
+  .lane .ln { font-size: 9.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; white-space: nowrap; }
+  .lane .lv { font-family: var(--mono); font-size: 13px; font-weight: 650; margin-top: 1px; white-space: nowrap; }
+  .lane .lx { font-family: var(--mono); font-size: 10px; color: var(--red); min-height: 12px; }
+  .lv.ok { color: var(--green); } .lv.mid { color: var(--yellow); } .lv.bad { color: var(--red); }
+  .recovery {
+    padding: 6px 12px; border-top: 1px solid var(--border); font-family: var(--mono);
+    font-size: 11px; color: var(--dim); min-height: 27px;
+  }
+  .recovery b { color: var(--text); font-weight: 600; }
+  .recovery .lost { color: var(--red); }
+  .recovery .saved { color: var(--green); }
+  .feeds { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--border); flex: 1; }
+  .feed { background: var(--panel); min-height: 100px; max-height: 130px; display: flex; flex-direction: column; min-width: 0; }
+  .feed .fh {
+    font-size: 9.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px;
+    padding: 6px 9px 3px;
+  }
+  .tokens {
+    font-family: var(--mono); font-size: 11px; padding: 0 9px 7px; overflow-y: auto;
+    white-space: pre-wrap; word-break: break-word; flex: 1; color: #aeb9c5;
+  }
+  .tools { list-style: none; margin: 0; padding: 0 9px 7px; overflow-y: auto; flex: 1; }
+  .tools li {
+    font-family: var(--mono); font-size: 10.5px; padding: 2px 0; color: #aeb9c5;
+    border-bottom: 1px dashed #1d2430; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .tools li b { color: var(--purple); font-weight: 600; }
+  footer { padding: 0 20px 24px; color: var(--dim); font-size: 11.5px; max-width: 1300px; }
+  footer code { font-family: var(--mono); background: var(--panel); padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>cloud agent desktop</h1>
+  <span class="sub">one scripted coding agent · identical events, timestamps &amp; frame pacing · three wires, side by side · click any desktop</span>
+  <span class="right">
+    <label class="auto"><input type="checkbox" id="auto-interact" checked> auto-interact</label>
+    <button id="drop-btn" title="Close every arm's connection(s), 1.5s dead air, then reconnect — a wifi roam">simulate network drop</button>
+    <span id="net">loading…</span>
+  </span>
+</header>
+
+<div id="summary">
+  <div class="headline"><div class="k">click → response RTT p99</div><div class="v" id="h-action">–</div><div class="d" id="h-action-d"></div></div>
+  <div class="headline"><div class="k">reasoning token p99</div><div class="v" id="h-token">–</div><div class="d" id="h-token-d"></div></div>
+  <div class="headline"><div class="k">telemetry p99</div><div class="v" id="h-tele">–</div><div class="d" id="h-tele-d"></div></div>
+  <div class="headline"><div class="k">screen p50 (same pacing everywhere)</div><div class="v" id="h-screen">–</div><div class="d" id="h-screen-d"></div></div>
+</div>
+
+<main id="main"></main>
+
+<footer>
+  Latency is one-way publish→receive over one emulated <span id="foot-net">…</span> link <em>per arm</em>
+  (same RTT, same bottleneck, same queue model; within the glued arm its three connections share one link).
+  All three arms run the identical latest-frame-wins screen protocol — the WS arms via an ack message,
+  quicrtc via a publish-back receipts track — so the screen lane is a controlled variable and the
+  interactive lanes are the experiment. The baselines are steelmanned: lean binary envelopes, ack-paced
+  frames, and hand-rolled SSE token replay on the glued arm. The network-drop button closes every arm's
+  connection(s), waits 1.5&nbsp;s, and reconnects: quicrtc re-dials once with <code>{session, last_seen}</code>
+  and the server replays what was missed; the glued arm re-opens three connections and recovers only its
+  SSE lane; the single WS recovers nothing. Headless version: <code>go run ./examples/agent-desktop -bench 60s</code>.
+</footer>
+
+<script type="module">
+// ── config ──────────────────────────────────────────────────────────
+const cfg = await (await fetch('/config')).json();
+const netDesc = `${cfg.profile}: rtt ${cfg.rttMs}ms · ${cfg.mbps ? cfg.mbps + ' Mbps' : 'unlimited'}${cfg.lossPct ? ' · ' + cfg.lossPct.toFixed(1) + '% loss (quic only)' : ''}`;
+document.getElementById('net').textContent = 'emulated link — ' + netDesc;
+document.getElementById('foot-net').textContent = netDesc;
+
+const td = new TextDecoder(), te = new TextEncoder();
+const WINDOW_MS = 30000;
+const OUTAGE_MS = 1500;
+
+function esc(s) {
+  return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+function oneWayMs(ptsMicro) { return Date.now() - Number(ptsMicro) / 1000; }
+function fmtMs(v) { return v === null ? '–' : v < 10 ? v.toFixed(1) : Math.round(v).toString(); }
+function grade(v) { return v === null ? '' : v < 130 ? 'ok' : v < 400 ? 'mid' : 'bad'; }
+
+// ── per-lane stats with loss tracking ───────────────────────────────
+function makeLaneStats() {
+  return { samples: [], expected: -1, missing: new Set(), lastArrival: 0, lastLat: 0 };
+}
+function addSample(ls, latMs, seq, blackout) {
+  const now = performance.now();
+  if (!blackout) {
+    ls.samples.push([now, latMs]);
+    while (ls.samples.length && ls.samples[0][0] < now - WINDOW_MS) ls.samples.shift();
+  }
+  if (seq >= 0) {
+    if (ls.missing.has(seq)) ls.missing.delete(seq);
+    else if (ls.expected >= 0 && seq > ls.expected) {
+      for (let s = ls.expected; s < seq && ls.missing.size < 4096; s++) ls.missing.add(s);
+    }
+    if (seq >= ls.expected) ls.expected = seq + 1;
+  }
+  ls.lastArrival = now;
+  ls.lastLat = latMs;
+}
+function pct(ls, p) {
+  if (!ls.samples.length) return null;
+  const s = ls.samples.map(x => x[1]).sort((a, b) => a - b);
+  return s[Math.floor(p * (s.length - 1))];
+}
+
+// ── pane construction ───────────────────────────────────────────────
+const LANES = [
+  ['actions', 'click RTT'], ['tokens', 'tokens'], ['telemetry', 'telemetry'], ['screen', 'screen'],
+];
+
+function makeSide(prefix, title, proto, connCount) {
+  const pane = document.createElement('section');
+  pane.className = 'pane';
+  pane.innerHTML = `
+    <div class="bar">
+      <span class="title">${esc(title)}</span>
+      <span class="proto">${esc(proto)}</span>
+      <span class="pill" id="${prefix}-state" data-s="connecting">connecting</span>
+    </div>
+    <div class="screenwrap">
+      <canvas class="screen" id="${prefix}-canvas" width="${cfg.width}" height="${cfg.height}"></canvas>
+      <span class="agebadge" id="${prefix}-age">–</span>
+      <span class="clickhint">click = remote input → watch for the ripple</span>
+    </div>
+    <div class="lanes">${LANES.map(([key, label]) =>
+      `<div class="lane"><div class="ln">${label} p50/p99</div><div class="lv" id="${prefix}-lv-${key}">–</div><div class="lx" id="${prefix}-lx-${key}"></div></div>`).join('')}
+    </div>
+    <div class="recovery" id="${prefix}-recovery">no drops yet — press “simulate network drop”</div>
+    <div class="feeds">
+      <div class="feed"><div class="fh">reasoning (live tokens)</div><div class="tokens" id="${prefix}-tokens"></div></div>
+      <div class="feed"><div class="fh">tool calls</div><ul class="tools" id="${prefix}-tools"></ul></div>
+    </div>`;
+  document.getElementById('main').appendChild(pane);
+
+  const el = id => document.getElementById(prefix + '-' + id);
+  const canvas = el('canvas');
+  const side = {
+    prefix, connCount,
+    ctx: canvas.getContext('2d'),
+    canvas,
+    stats: { screen: makeLaneStats(), tokens: makeLaneStats(), tools: makeLaneStats(), telemetry: makeLaneStats(), actions: makeLaneStats() },
+    tokensEl: el('tokens'), toolsEl: el('tools'),
+    ageEl: el('age'), stateEl: el('state'), recoveryEl: el('recovery'),
+    drawing: false, pendingFrame: null, tokenBuf: '',
+    blackoutUntil: 0,          // perf.now(); replayed-late AUs excluded from stats
+    dropState: null,           // {reconnStart, firstDataMs} while measuring a drop
+    sendAction: null, sendFrameAck: null, dropNow: null,
+  };
+  side.setState = (s) => { side.stateEl.dataset.s = s; side.stateEl.textContent = s; };
+  side.inBlackout = () => performance.now() < side.blackoutUntil;
+
+  side.onFrame = (seq, ptsMicro, bytes) => {
+    side.noteFirstData();
+    addSample(side.stats.screen, oneWayMs(ptsMicro), seq, side.inBlackout());
+    side.pendingFrame = bytes;
+    if (!side.drawing) drainFrames(side);
+  };
+  side.onToken = (seq, ptsMicro, bytes) => {
+    side.noteFirstData();
+    addSample(side.stats.tokens, oneWayMs(ptsMicro), seq, side.inBlackout());
+    side.tokenBuf += td.decode(bytes);
+  };
+  side.onTool = (seq, ptsMicro, bytes) => {
+    side.noteFirstData();
+    addSample(side.stats.tools, oneWayMs(ptsMicro), seq, side.inBlackout());
+    let call = {};
+    try { call = JSON.parse(td.decode(bytes)); } catch {}
+    const li = document.createElement('li');
+    li.innerHTML = `<b>${esc(call.tool || '?')}</b> ${esc(call.cmd || call.path || call.note || '')}`;
+    side.toolsEl.insertBefore(li, side.toolsEl.firstChild);
+    while (side.toolsEl.childElementCount > 20) side.toolsEl.removeChild(side.toolsEl.lastChild);
+  };
+  side.onTelemetry = (seq, bytes) => {
+    side.noteFirstData();
+    let obj = {};
+    try { obj = JSON.parse(td.decode(bytes)); } catch { return; }
+    if (typeof obj.ts_us === 'number') addSample(side.stats.telemetry, oneWayMs(obj.ts_us), seq, side.inBlackout());
+  };
+  side.onActionAck = (tsMicro) => {
+    addSample(side.stats.actions, Date.now() - Number(tsMicro) / 1000, -1, side.inBlackout());
+  };
+
+  // Drop bookkeeping: reconnect time = reconnect attempt → first data.
+  side.noteFirstData = () => {
+    if (side.dropState && side.dropState.firstDataMs === null) {
+      side.dropState.firstDataMs = performance.now() - side.dropState.reconnStart;
+      side.blackoutUntil = performance.now() + 1000;
+      renderRecovery(side);
+    }
+  };
+  side.beginDrop = () => {
+    // Snapshot loss before the drop so the recovery line reports the
+    // gap's damage, not historical loss.
+    side.dropState = {
+      reconnStart: null, firstDataMs: null,
+      lostBefore: side.stats.tokens.missing.size + side.stats.telemetry.missing.size,
+    };
+    side.blackoutUntil = performance.now() + 3600 * 1000; // until first data
+    side.setState('dropped');
+  };
+  side.beginReconnect = () => {
+    if (side.dropState) side.dropState.reconnStart = performance.now();
+  };
+
+  canvas.addEventListener('click', (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = Math.round((ev.clientX - rect.left) / rect.width * cfg.width);
+    const y = Math.round((ev.clientY - rect.top) / rect.height * cfg.height);
+    sendActionEverywhere(x, y); // same click on every arm — apples to apples
+  });
+  return side;
+}
+
+function renderRecovery(side) {
+  const d = side.dropState;
+  if (!d) return;
+  const lostNow = side.stats.tokens.missing.size + side.stats.telemetry.missing.size;
+  const lost = Math.max(0, lostNow - d.lostBefore);
+  const conns = side.connCount === 1 ? '1 conn' : side.connCount + ' conns';
+  const lossHtml = lost === 0
+    ? `<span class="saved">0 messages lost${side.prefix === 'q' ? ' — replayed by the transport' : ''}</span>`
+    : `<span class="lost">${lost} messages lost forever</span>`;
+  side.recoveryEl.innerHTML =
+    `last drop: reconnected <b>${conns}</b> in <b>${Math.round(d.firstDataMs)} ms</b> · ${lossHtml}`;
+}
+
+async function drainFrames(side) {
+  side.drawing = true;
+  while (side.pendingFrame) {
+    const bytes = side.pendingFrame;
+    side.pendingFrame = null;
+    try {
+      const bmp = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+      side.ctx.drawImage(bmp, 0, 0, side.canvas.width, side.canvas.height);
+      bmp.close();
+    } catch { /* truncated frame at a drop boundary; next one recovers */ }
+    if (side.sendFrameAck) side.sendFrameAck(); // latest-frame-wins pacing, all arms
+  }
+  side.drawing = false;
+}
+
+// ── the three arms ──────────────────────────────────────────────────
+const wsSide = makeSide('ws', 'single WebSocket', 'all 4 lanes on one TCP stream', 1);
+const gluedSide = makeSide('g', 'glued stack', 'frames WS + events WS + tokens SSE', 3);
+const qSide = makeSide('q', 'quicrtc', '4 lanes + input, one QUIC connection', 1);
+const sides = [wsSide, gluedSide, qSide];
+
+let actionSeq = 1;
+function sendActionEverywhere(x, y) {
+  const seq = actionSeq++;
+  for (const s of sides) if (s.sendAction) s.sendAction(seq, x, y);
+}
+
+// Auto-interact: a synthetic click every 1.5s keeps the RTT lane fed
+// (~20 samples per stats window; a human clicking works too).
+setInterval(() => {
+  if (!document.getElementById('auto-interact').checked) return;
+  const x = 40 + Math.floor(Math.random() * (cfg.width - 80));
+  const y = 60 + Math.floor(Math.random() * (cfg.height - 140));
+  sendActionEverywhere(x, y);
+}, 1500);
+
+// ── envelope helpers (both WS arms) ─────────────────────────────────
+const L_SCREEN = 1, L_TOKENS = 2, L_TOOLS = 3, L_TELE = 4, L_ACTION = 5, L_FRAMEACK = 6;
+
+function envelope(lane, seq, tsMicro, payload) {
+  const p = payload || new Uint8Array(0);
+  const msg = new Uint8Array(13 + p.byteLength);
+  const dv = new DataView(msg.buffer);
+  msg[0] = lane;
+  dv.setUint32(1, seq, false);
+  dv.setBigUint64(5, BigInt(tsMicro), false);
+  msg.set(p, 13);
+  return msg;
+}
+
+function handleWSMessage(side, data, routeFrames) {
+  const b = new Uint8Array(data);
+  if (b.byteLength < 13) return;
+  const dv = new DataView(b.buffer, b.byteOffset, 13);
+  const lane = b[0], seq = dv.getUint32(1, false), pts = Number(dv.getBigUint64(5, false));
+  const payload = b.subarray(13);
+  switch (lane) {
+    case L_SCREEN: if (routeFrames) side.onFrame(seq, pts, payload); break;
+    case L_TOKENS: side.onToken(seq, pts, payload); break;
+    case L_TOOLS: side.onTool(seq, pts, payload); break;
+    case L_TELE: side.onTelemetry(seq, payload); break;
+    case L_ACTION: side.onActionAck(pts); break;
+  }
+}
+
+function actionPayload(x, y) {
+  return te.encode(JSON.stringify({ x, y }));
+}
+
+// ── arm 1: single WebSocket ─────────────────────────────────────────
+function connectSingleWS(side) {
+  const ws = new WebSocket(cfg.wsUrl);
+  ws.binaryType = 'arraybuffer';
+  let alive = true;
+  ws.onopen = () => side.setState('connected');
+  ws.onerror = () => { if (alive) side.setState('error'); };
+  ws.onclose = () => {
+    if (!alive) return;
+    side.setState('closed');
+    setTimeout(() => connectSingleWS(side), 1500);
+  };
+  ws.onmessage = (ev) => handleWSMessage(side, ev.data, true);
+  side.sendAction = (seq, x, y) => {
+    if (ws.readyState === 1) ws.send(envelope(L_ACTION, seq, Date.now() * 1000, actionPayload(x, y)));
+  };
+  side.sendFrameAck = () => {
+    if (ws.readyState === 1) ws.send(envelope(L_FRAMEACK, 0, 0, null));
+  };
+  side.dropNow = () => {
+    alive = false;
+    side.beginDrop();
+    ws.onclose = null; ws.close();
+    setTimeout(() => { side.beginReconnect(); connectSingleWS(side); }, OUTAGE_MS);
+  };
+}
+
+// ── arm 2: glued stack (frames WS + events WS + SSE) ────────────────
+function connectGlued(side) {
+  let framesWS, eventsWS, es;
+  let alive = true;
+  let openCount = 0;
+  const opened = () => { if (++openCount >= 2) side.setState('connected'); };
+  const retry = () => {
+    if (!alive) return;
+    alive = false;
+    side.setState('closed');
+    closeAll();
+    setTimeout(() => connectGlued(side), 1500);
+  };
+  const closeAll = () => {
+    if (framesWS) { framesWS.onclose = null; framesWS.close(); }
+    if (eventsWS) { eventsWS.onclose = null; eventsWS.close(); }
+    if (es) es.close();
+  };
+
+  framesWS = new WebSocket(cfg.gluedFramesUrl);
+  framesWS.binaryType = 'arraybuffer';
+  framesWS.onopen = opened;
+  framesWS.onclose = retry;
+  framesWS.onmessage = (ev) => handleWSMessage(side, ev.data, true);
+
+  eventsWS = new WebSocket(cfg.gluedEventsUrl);
+  eventsWS.binaryType = 'arraybuffer';
+  eventsWS.onopen = opened;
+  eventsWS.onclose = retry;
+  eventsWS.onmessage = (ev) => handleWSMessage(side, ev.data, false);
+
+  // SSE tokens, resuming from the last seq we saw (hand-rolled
+  // Last-Event-ID — the one lane this arm can replay).
+  const from = side.stats.tokens.expected > 0 ? side.stats.tokens.expected - 1 : 0;
+  es = new EventSource(cfg.gluedSseUrl + (from ? `?from=${from}` : ''));
+  es.onmessage = (ev) => {
+    let tok;
+    try { tok = JSON.parse(ev.data); } catch { return; }
+    side.onToken(tok.seq, tok.ts_us, te.encode(tok.text));
+  };
+
+  side.sendAction = (seq, x, y) => {
+    if (eventsWS.readyState === 1) eventsWS.send(envelope(L_ACTION, seq, Date.now() * 1000, actionPayload(x, y)));
+  };
+  side.sendFrameAck = () => {
+    if (framesWS.readyState === 1) framesWS.send(envelope(L_FRAMEACK, 0, 0, null));
+  };
+  side.dropNow = () => {
+    alive = false;
+    side.beginDrop();
+    closeAll();
+    setTimeout(() => { side.beginReconnect(); connectGlued(side); }, OUTAGE_MS);
+  };
+}
+
+// ── arm 3: quicrtc over raw WebTransport (wire format v1) ───────────
+// Control frames: [1B type][3B BE len][payload]. Feed frames add
+// [8B BE pts µs][4B BE seq][1B flags]. Uni/bidi streams open with a
+// TypeStreamHeader naming the track; telemetry rides datagrams.
+// Publish-back (user_actions, frame_acks) = TypeAnnounce on the
+// control stream + one uni stream per track carrying feed frames.
+// Resume = HELLO {session, last_seen}; the server replays what the
+// browser missed.
+const T_HELLO = 0x01, T_SDP = 0x02, T_ERROR = 0x05, T_ANNOUNCE = 0x0a;
+const T_KEY = 0x20, T_P = 0x21, T_FRAME = 0x22, T_HDR = 0x23, T_DGRAM = 0x24;
+
+function b64urlToBytes(s) {
+  let b64 = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (b64.length % 4) b64 += '=';
+  const bin = atob(b64);
+  return Uint8Array.from(bin, c => c.charCodeAt(0));
+}
+
+function controlFrame(typ, payload) {
+  const p = payload || new Uint8Array(0);
+  const buf = new Uint8Array(4 + p.byteLength);
+  buf[0] = typ;
+  buf[1] = p.byteLength >> 16; buf[2] = (p.byteLength >> 8) & 0xff; buf[3] = p.byteLength & 0xff;
+  buf.set(p, 4);
+  return buf;
+}
+
+function feedFrame(seq, ptsMicro, payload) {
+  const buf = new Uint8Array(17 + payload.byteLength);
+  const dv = new DataView(buf.buffer);
+  buf[0] = T_KEY;
+  buf[1] = payload.byteLength >> 16; buf[2] = (payload.byteLength >> 8) & 0xff; buf[3] = payload.byteLength & 0xff;
+  dv.setBigUint64(4, BigInt(ptsMicro), false);
+  dv.setUint32(12, seq, false);
+  buf[16] = 1; // FlagKeyframe
+  buf.set(payload, 17);
+  return buf;
+}
+
+function streamHeader(name) {
+  const n = te.encode(name);
+  const buf = new Uint8Array(4 + n.byteLength);
+  buf[0] = T_HDR;
+  buf[1] = n.byteLength >> 16; buf[2] = (n.byteLength >> 8) & 0xff; buf[3] = n.byteLength & 0xff;
+  buf.set(n, 4);
+  return buf;
+}
+
+function byteReader(stream) {
+  const reader = stream.getReader();
+  let buf = new Uint8Array(0);
+  return {
+    async take(n) {
+      while (buf.byteLength < n) {
+        const { value, done } = await reader.read();
+        if (done) return null;
+        const m = new Uint8Array(buf.byteLength + value.byteLength);
+        m.set(buf, 0); m.set(value, buf.byteLength);
+        buf = m;
+      }
+      const out = buf.subarray(0, n);
+      buf = buf.subarray(n);
+      return out;
+    },
+  };
+}
+
+async function readFeedFrames(stream, onAU) {
+  const r = byteReader(stream);
+  let first = await r.take(1);
+  if (first === null) return;
+  let track = '';
+  if (first[0] === T_HDR) {
+    const lenB = await r.take(3);
+    if (!lenB) return;
+    const n = (lenB[0] << 16) | (lenB[1] << 8) | lenB[2];
+    const name = await r.take(n);
+    if (!name) return;
+    track = td.decode(name);
+    first = await r.take(1);
+    if (first === null) return;
+  }
+  for (;;) {
+    const typ = first[0];
+    const rest = await r.take(16); // 3B len + 8B pts + 4B seq + 1B flags
+    if (!rest) return;
+    const len = (rest[0] << 16) | (rest[1] << 8) | rest[2];
+    const dv = new DataView(rest.buffer, rest.byteOffset);
+    const pts = Number(dv.getBigUint64(3, false));
+    const seq = dv.getUint32(11, false);
+    const payload = len ? await r.take(len) : new Uint8Array(0);
+    if (payload === null) return;
+    if (typ === T_KEY || typ === T_P || typ === T_FRAME) {
+      onAU(track, seq, pts, new Uint8Array(payload)); // copy: reader buffer moves
+    }
+    first = await r.take(1);
+    if (first === null) return;
+  }
+}
+
+// Session state carried ACROSS reconnects for resume.
+const qResume = { sessionId: '', lastSeen: {} };
+
+function qTrackSeen(track, seq) {
+  if ((qResume.lastSeen[track] ?? -1) < seq) qResume.lastSeen[track] = seq;
+}
+
+async function connectQuicrtc(side, isResume) {
+  let wt;
+  let alive = true;
+  const retry = () => {
+    if (!alive) return;
+    alive = false;
+    side.setState('closed');
+    setTimeout(() => connectQuicrtc(side, true), 1500);
+  };
+  try {
+    wt = new WebTransport(cfg.wtUrl, {
+      serverCertificateHashes: [{ algorithm: 'sha-256', value: b64urlToBytes(cfg.certHash) }],
+    });
+    await wt.ready;
+  } catch (e) {
+    side.setState('error');
+    console.error('webtransport:', e);
+    setTimeout(() => connectQuicrtc(side, true), 1500);
+    return;
+  }
+  wt.closed.then(retry).catch(retry);
+
+  // Control stream: HELLO (with resume state on reconnect) → SDP.
+  const ctl = await wt.createBidirectionalStream();
+  const w = ctl.writable.getWriter();
+  const hello = { role: 'recv', slug: cfg.slug, ver: '1' };
+  if (isResume && qResume.sessionId) {
+    hello.session = qResume.sessionId;
+    hello.last_seen = qResume.lastSeen;
+  }
+  await w.write(controlFrame(T_HELLO, te.encode(JSON.stringify(hello))));
+
+  const ctlR = byteReader(ctl.readable);
+  for (;;) {
+    const h = await ctlR.take(4);
+    if (!h) { side.setState('error'); return; }
+    const n = (h[1] << 16) | (h[2] << 8) | h[3];
+    const body = n ? await ctlR.take(n) : new Uint8Array(0);
+    if (h[0] === T_SDP) {
+      try { qResume.sessionId = JSON.parse(td.decode(body)).session || qResume.sessionId; } catch {}
+      break;
+    }
+    if (h[0] === T_ERROR) { side.setState('error'); console.error('quicrtc:', td.decode(body)); return; }
+  }
+
+  // Publish-back tracks: announce, then one uni stream each.
+  await w.write(controlFrame(T_ANNOUNCE, te.encode(JSON.stringify({ name: 'user_actions', kind: 'toolcalls' }))));
+  await w.write(controlFrame(T_ANNOUNCE, te.encode(JSON.stringify({ name: 'frame_acks', kind: 'tokens' }))));
+  const actionStream = await wt.createUnidirectionalStream();
+  const actionW = actionStream.getWriter();
+  await actionW.write(streamHeader('user_actions'));
+  const ackStream = await wt.createUnidirectionalStream();
+  const ackW = ackStream.getWriter();
+  await ackW.write(streamHeader('frame_acks'));
+
+  side.setState('connected');
+  // Keep draining control frames so flow-control credit moves.
+  (async () => {
+    for (;;) {
+      const h = await ctlR.take(4);
+      if (!h) return;
+      const n = (h[1] << 16) | (h[2] << 8) | h[3];
+      if (n && (await ctlR.take(n)) === null) return;
+    }
+  })();
+
+  const onAU = (track, seq, pts, payload) => {
+    switch (track) {
+      case 'screen': qTrackSeen(track, seq); side.onFrame(seq, pts, payload); break;
+      case 'reasoning': qTrackSeen(track, seq); side.onToken(seq, pts, payload); break;
+      case 'toolcalls': qTrackSeen(track, seq); side.onTool(seq, pts, payload); break;
+      case 'acks': {
+        let ack = {};
+        try { ack = JSON.parse(td.decode(payload)); } catch {}
+        if (ack.t_us) side.onActionAck(ack.t_us);
+        break;
+      }
+    }
+  };
+
+  (async () => { // uni feed streams (fresh one per screen GOP + persistent per token lane)
+    const uni = wt.incomingUnidirectionalStreams.getReader();
+    for (;;) {
+      const { value, done } = await uni.read();
+      if (done) return;
+      readFeedFrames(value, onAU).catch(() => {});
+    }
+  })();
+
+  (async () => { // bidi streams: one per tool call; FIN our half
+    const bidi = wt.incomingBidirectionalStreams.getReader();
+    for (;;) {
+      const { value, done } = await bidi.read();
+      if (done) return;
+      value.writable.close().catch(() => {});
+      readFeedFrames(value.readable, onAU).catch(() => {});
+    }
+  })();
+
+  (async () => { // datagrams: telemetry envelope [0x24][id][2B seq][payload]
+    const dg = wt.datagrams.readable.getReader();
+    for (;;) {
+      const { value, done } = await dg.read();
+      if (done) return;
+      if (value.byteLength < 4 || value[0] !== T_DGRAM) continue;
+      side.onTelemetry((value[2] << 8) | value[3], value.subarray(4));
+    }
+  })();
+
+  let aSeq = 0, fSeq = 0;
+  side.sendAction = (seq, x, y) => {
+    const body = te.encode(JSON.stringify({ t_us: Date.now() * 1000, x, y }));
+    actionW.write(feedFrame(aSeq++, Date.now() * 1000, body)).catch(() => {});
+  };
+  side.sendFrameAck = () => {
+    ackW.write(feedFrame(fSeq++, Date.now() * 1000, new Uint8Array([1]))).catch(() => {});
+  };
+  side.dropNow = () => {
+    alive = false;
+    side.beginDrop();
+    try { wt.close(); } catch {}
+    setTimeout(() => { side.beginReconnect(); connectQuicrtc(side, true); }, OUTAGE_MS);
+  };
+}
+
+connectSingleWS(wsSide);
+connectGlued(gluedSide);
+connectQuicrtc(qSide, false);
+
+// ── the drop button ─────────────────────────────────────────────────
+// The actual drop waits (up to 12s) for a moment when tokens are
+// actively streaming, so the gap deterministically contains data
+// whose fate differs per arm — otherwise the demo moment depends on
+// where the script's pauses fall.
+const dropBtn = document.getElementById('drop-btn');
+dropBtn.addEventListener('click', () => {
+  dropBtn.disabled = true;
+  dropBtn.textContent = 'waiting for token burst…';
+  const t0 = performance.now();
+  const poll = setInterval(() => {
+    const active = performance.now() - qSide.stats.tokens.lastArrival < 250;
+    if (!active && performance.now() - t0 < 12000) return;
+    clearInterval(poll);
+    dropBtn.textContent = 'dropped!';
+    for (const s of sides) if (s.dropNow) s.dropNow();
+    setTimeout(() => {
+      dropBtn.disabled = false;
+      dropBtn.textContent = 'simulate network drop';
+    }, OUTAGE_MS + 3000);
+  }, 100);
+});
+
+// ── render loop ─────────────────────────────────────────────────────
+setInterval(() => { // token DOM flush at 10 Hz (per-token layout would pollute the measurement)
+  for (const side of sides) {
+    if (!side.tokenBuf) continue;
+    side.tokensEl.textContent = (side.tokensEl.textContent + side.tokenBuf).slice(-1200);
+    side.tokenBuf = '';
+    side.tokensEl.scrollTop = side.tokensEl.scrollHeight;
+  }
+}, 100);
+
+function renderSide(side) {
+  for (const [key] of LANES) {
+    const ls = side.stats[key];
+    const p50 = pct(ls, 0.5), p99 = pct(ls, 0.99);
+    const lv = document.getElementById(`${side.prefix}-lv-${key}`);
+    lv.textContent = `${fmtMs(p50)} / ${fmtMs(p99)} ms`;
+    lv.className = 'lv ' + grade(p99);
+    const lx = document.getElementById(`${side.prefix}-lx-${key}`);
+    const lost = key === 'tokens' ? side.stats.tokens.missing.size
+               : key === 'telemetry' ? side.stats.telemetry.missing.size : 0;
+    lx.textContent = lost ? `${lost} lost` : '';
+  }
+  const scr = side.stats.screen;
+  if (scr.lastArrival) {
+    const age = performance.now() - scr.lastArrival;
+    if (age > 1500) {
+      side.ageEl.textContent = `FROZEN ${(age / 1000).toFixed(1)}s`;
+      side.ageEl.className = 'agebadge frozen';
+    } else {
+      side.ageEl.textContent = `screen behind by ${fmtMs(scr.lastLat)} ms`;
+      side.ageEl.className = 'agebadge' + (scr.lastLat > 450 ? ' warn' : '');
+    }
+  }
+  if (side.dropState && side.dropState.firstDataMs !== null) renderRecovery(side);
+}
+
+function headline(id, pickLane, p) {
+  const ws = pct(pickLane(wsSide), p), g = pct(pickLane(gluedSide), p), q = pct(pickLane(qSide), p);
+  const v = document.getElementById('h-' + id), d = document.getElementById('h-' + id + '-d');
+  if (ws === null || g === null || q === null) { v.textContent = '–'; d.textContent = 'measuring…'; return; }
+  const best = Math.min(ws, g);
+  const ratio = best / q;
+  v.textContent = ratio >= 1.15 ? ratio.toFixed(1) + '× lower' : '≈ even';
+  v.className = 'v' + (ratio >= 1.15 ? ' good' : '');
+  d.textContent = `1-ws ${fmtMs(ws)} · glued ${fmtMs(g)} → quicrtc ${fmtMs(q)} ms`;
+}
+
+setInterval(() => {
+  for (const s of sides) renderSide(s);
+  headline('action', s => s.stats.actions, 0.99);
+  headline('token', s => s.stats.tokens, 0.99);
+  headline('tele', s => s.stats.telemetry, 0.99);
+  headline('screen', s => s.stats.screen, 0.5);
+}, 500);
+</script>
+</body>
+</html>

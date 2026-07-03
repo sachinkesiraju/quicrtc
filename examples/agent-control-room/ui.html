@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>agent-control-room — parallel steerable session</title>
+<style>
+  :root { --bg:#0b0e13; --panel:#12161f; --text:#d8dee9; --dim:#7a8494; --accent:#6ba3ff; --ok:#6fcf97; --warn:#e8b86a; --bad:#e06c75; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:14px/1.4 system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:10px 16px; border-bottom:1px solid #1e2430; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+  header h1 { font-size:15px; margin:0; font-weight:650; }
+  .pill { font-size:11px; padding:2px 8px; border-radius:999px; background:#1a2030; color:var(--dim); }
+  .pill.ok { color:var(--ok); }
+  main { display:grid; grid-template-columns: 1.2fr 1fr; gap:10px; padding:10px; min-height:calc(100vh - 120px); }
+  .panel { background:var(--panel); border:1px solid #1e2430; border-radius:8px; padding:10px; min-height:120px; }
+  .panel h2 { margin:0 0 8px; font-size:12px; text-transform:uppercase; letter-spacing:.4px; color:var(--dim); }
+  #screen { width:100%; aspect-ratio:16/10; background:#000; border-radius:4px; }
+  #reasoning { font-family:ui-monospace,monospace; font-size:12px; white-space:pre-wrap; max-height:220px; overflow:auto; color:#aeb9c5; }
+  .tools { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+  .tool-col { background:#0d1118; border:1px solid #222a38; border-radius:6px; padding:8px; font-size:11px; max-height:180px; overflow:auto; }
+  .tool-col h3 { margin:0 0 6px; font-size:11px; color:var(--accent); }
+  .tool-item { margin:0 0 6px; padding:4px; border-left:2px solid #333; }
+  .tool-item.running { border-color:var(--warn); }
+  .tool-item.done { border-color:var(--ok); }
+  .tool-item.cancelled { border-color:var(--bad); opacity:.7; }
+  .steer { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+  button { background:#1c2433; color:var(--text); border:1px solid #2a3448; border-radius:6px; padding:6px 10px; cursor:pointer; font-size:12px; }
+  button:hover { border-color:var(--accent); }
+  button.danger { border-color:#5a3038; color:#f0a8b0; }
+  #telemetry { font-family:ui-monospace,monospace; font-size:11px; color:var(--dim); white-space:pre-wrap; }
+  footer { padding:8px 16px; font-size:11px; color:var(--dim); border-top:1px solid #1e2430; }
+</style>
+</head>
+<body>
+<header>
+  <h1>agent-control-room</h1>
+  <span id="state" class="pill">connecting…</span>
+  <span class="pill">parallel sub-agents on one quicrtc session</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Screen</h2>
+    <canvas id="screen" width="1280" height="800"></canvas>
+  </section>
+  <section class="panel">
+    <h2>Reasoning (multiplexed)</h2>
+    <div id="reasoning"></div>
+    <h2 style="margin-top:12px">Steer</h2>
+    <div class="steer">
+      <button class="danger" id="cancel-all">Cancel all workers</button>
+      <button class="danger" data-cancel="tests">Cancel tests</button>
+      <button class="danger" data-cancel="code">Cancel code</button>
+      <button class="danger" data-cancel="ship">Cancel ship</button>
+      <button id="inject">Inject: use invoice-level rounding</button>
+      <button id="fork">Fork from last checkpoint</button>
+    </div>
+  </section>
+  <section class="panel" style="grid-column:1/-1">
+    <h2>Parallel tool calls (one bidi stream each)</h2>
+    <div class="tools">
+      <div class="tool-col"><h3>tests</h3><div id="tools-tests"></div></div>
+      <div class="tool-col"><h3>code</h3><div id="tools-code"></div></div>
+      <div class="tool-col"><h3>ship</h3><div id="tools-ship"></div></div>
+    </div>
+  </section>
+  <section class="panel" style="grid-column:1/-1">
+    <h2>Telemetry</h2>
+    <pre id="telemetry">–</pre>
+  </section>
+</main>
+<footer>Inspectable · steerable · parallel · forkable — <code>go run ./examples/agent-control-room -thesis-bench</code></footer>
+<script type="module">
+const cfg = await (await fetch('/config')).json();
+const td = new TextDecoder(), te = new TextEncoder();
+const stateEl = document.getElementById('state');
+const reasoningEl = document.getElementById('reasoning');
+const telemEl = document.getElementById('telemetry');
+const canvas = document.getElementById('screen');
+const ctx = canvas.getContext('2d');
+
+const T_HELLO=0x01,T_SDP=0x02,T_ERROR=0x05,T_ANNOUNCE=0x0a,T_KEY=0x20,T_FRAME=0x22,T_HDR=0x23,T_DGRAM=0x24;
+
+function b64urlToBytes(s) {
+  let b64 = s.replace(/-/g,'+').replace(/_/g,'/'); while (b64.length%4) b64+='=';
+  return Uint8Array.from(atob(b64), c=>c.charCodeAt(0));
+}
+function controlFrame(typ,payload){const p=payload||new Uint8Array(0);const b=new Uint8Array(4+p.byteLength);b[0]=typ;b[1]=p.byteLength>>16;b[2]=(p.byteLength>>8)&255;b[3]=p.byteLength&255;b.set(p,4);return b;}
+function streamHeader(name){const n=te.encode(name);const b=new Uint8Array(4+n.byteLength);b[0]=T_HDR;b[1]=n.byteLength>>16;b[2]=(n.byteLength>>8)&255;b[3]=n.byteLength&255;b.set(n,4);return b;}
+function feedAck(seq){const b=new Uint8Array(17);const dv=new DataView(b.buffer);b[0]=T_KEY;b[16]=1;dv.setBigUint64(4,BigInt(Date.now()*1000),false);dv.setUint32(12,seq,false);return b;}
+
+function byteReader(stream){const reader=stream.getReader();let buf=new Uint8Array(0);return{async take(n){while(buf.byteLength<n){const{value,done}=await reader.read();if(done)return null;const m=new Uint8Array(buf.byteLength+value.byteLength);m.set(buf,0);m.set(value,buf.byteLength);buf=m;}const out=buf.subarray(0,n);buf=buf.subarray(n);return out;}};}
+
+async function readFeedFrames(stream,onAU){const r=byteReader(stream);let first=await r.take(1);if(!first)return;let track='';if(first[0]===T_HDR){const lenB=await r.take(3);if(!lenB)return;const n=(lenB[0]<<16)|(lenB[1]<<8)|lenB[2];const name=await r.take(n);if(!name)return;track=td.decode(name);first=await r.take(1);if(!first)return;}for(;;){const typ=first[0];const rest=await r.take(16);if(!rest)return;const len=(rest[0]<<16)|(rest[1]<<8)|rest[2];const dv=new DataView(rest.buffer,rest.byteOffset);const pts=Number(dv.getBigUint64(3,false));const seq=dv.getUint32(11,false);const payload=len?await r.take(len):new Uint8Array(0);if(payload===null)return;if(typ===T_KEY||typ===T_FRAME)onAU(track,seq,pts,new Uint8Array(payload));first=await r.take(1);if(first===null)return;}}
+
+let steerWriter, ackWriter, wt;
+
+function addTool(worker, text, state){
+  const el = document.getElementById('tools-'+worker);
+  if(!el) return;
+  const d = document.createElement('div');
+  d.className = 'tool-item '+state;
+  d.textContent = text;
+  el.prepend(d);
+  while(el.children.length>8) el.lastChild.remove();
+}
+
+async function sendSteer(msg){
+  if(!steerWriter) return;
+  const body = te.encode(JSON.stringify({...msg, t_us: Date.now()*1000}));
+  const b = new Uint8Array(17+body.byteLength);
+  const dv = new DataView(b.buffer);
+  b[0]=T_KEY; b[16]=1;
+  dv.setBigUint64(4, BigInt(Date.now()*1000), false);
+  b.set(body,17);
+  await steerWriter.write(b);
+}
+
+async function connect(){
+  stateEl.textContent='connecting…';
+  wt = new WebTransport(cfg.wtUrl,{serverCertificateHashes:[{algorithm:'sha-256',value:b64urlToBytes(cfg.certHash)}]});
+  await wt.ready;
+  stateEl.textContent='connected'; stateEl.classList.add('ok');
+
+  const ctl = await wt.createBidirectionalStream();
+  const w = ctl.writable.getWriter();
+  await w.write(controlFrame(T_HELLO, te.encode(JSON.stringify({role:'recv',slug:cfg.slug,ver:'1'}))));
+  const ctlR = byteReader(ctl.readable);
+  for(;;){const h=await ctlR.take(4);if(!h)return;const n=(h[1]<<16)|(h[2]<<8)|h[3];const body=n?await ctlR.take(n):new Uint8Array(0);if(h[0]===T_SDP)break;if(h[0]===T_ERROR)throw new Error(td.decode(body));}
+
+  await w.write(controlFrame(T_ANNOUNCE, te.encode(JSON.stringify({name:'steer',kind:'toolcalls'}))));
+  await w.write(controlFrame(T_ANNOUNCE, te.encode(JSON.stringify({name:'frame_acks',kind:'tokens'}))));
+  const steerStream = await wt.createUnidirectionalStream();
+  steerWriter = steerStream.getWriter();
+  await steerWriter.write(streamHeader('steer'));
+  const ackStream = await wt.createUnidirectionalStream();
+  ackWriter = ackStream.getWriter();
+  await ackWriter.write(streamHeader('frame_acks'));
+
+  (async()=>{const uni=wt.incomingUnidirectionalStreams.getReader();for(;;){const{value,done}=await uni.read();if(done)return;readFeedFrames(value,(track,seq,pts,payload)=>{
+    if(track==='screen'){createImageBitmap(new Blob([payload],{type:'image/png'})).then(bmp=>{ctx.drawImage(bmp,0,0,canvas.width,canvas.height);ackWriter.write(feedAck(seq));});}
+    if(track==='reasoning') reasoningEl.textContent += td.decode(payload);
+    if(track==='toolcalls'){try{const t=JSON.parse(td.decode(payload));addTool(t.worker||'?', (t.tool||'?')+' '+(t.cmd||t.path||t.note||''), t.state||'done');}catch{}}}
+  ).catch(()=>{});}})();
+
+  (async()=>{const bidi=wt.incomingBidirectionalStreams.getReader();for(;;){const{value,done}=await bidi.read();if(done)return;readFeedFrames(value.readable,(track,seq,pts,payload)=>{
+    if(track==='toolcalls'){try{const t=JSON.parse(td.decode(payload));addTool(t.worker||'?', (t.tool||'?'), t.state||'running');}catch{}}}
+  ).catch(()=>{});}})();
+
+  if(wt.datagrams?.readable){
+    (async()=>{const r=wt.datagrams.readable.getReader();for(;;){const{value,done}=await r.read();if(done)return;if(value?.byteLength>=4)telemEl.textContent=td.decode(value.subarray(4));}})();
+  }
+}
+
+document.getElementById('cancel-all').onclick=()=>sendSteer({type:'cancel'});
+document.querySelectorAll('[data-cancel]').forEach(b=>b.onclick=()=>sendSteer({type:'cancel',worker:b.dataset.cancel}));
+document.getElementById('inject').onclick=()=>sendSteer({type:'inject',text:'use invoice-level rounding per billing spec'});
+document.getElementById('fork').onclick=async()=>{
+  const cp = await (await fetch('/api/checkpoint')).json();
+  await fetch('/api/fork',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(cp)});
+  reasoningEl.textContent += '\n[forked session from checkpoint]\n';
+};
+
+connect().catch(e=>{stateEl.textContent='error';console.error(e);});
+</script>
+</body>
+</html>

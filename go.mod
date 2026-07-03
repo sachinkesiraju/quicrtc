@@ -3,6 +3,8 @@ module github.com/sachinkesiraju/quicrtc
 go 1.25.0
 
 require (
+	github.com/chromedp/cdproto v0.0.0-20241022234722-4d5d5faf59fb
+	github.com/chromedp/chromedp v0.11.2
 	github.com/pion/rtcp v1.2.16
 	github.com/pion/webrtc/v4 v4.2.12
 	github.com/quic-go/quic-go v0.59.0
@@ -11,8 +13,14 @@ require (
 )
 
 require (
+	github.com/chromedp/sysutil v1.1.0 // indirect
 	github.com/dunglas/httpsfv v1.1.0 // indirect
+	github.com/gobwas/httphead v0.1.0 // indirect
+	github.com/gobwas/pool v0.2.1 // indirect
+	github.com/gobwas/ws v1.4.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/josharian/intern v1.0.0 // indirect
+	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/pion/datachannel v1.6.0 // indirect
 	github.com/pion/dtls/v3 v3.1.2 // indirect
 	github.com/pion/ice/v4 v4.2.5 // indirect
